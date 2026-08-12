@@ -116,3 +116,51 @@ enum ScreenGeometry {
         NSScreen.screens.map(\.frame)
     }
 }
+
+/// Reads the document text around the caret, to give the model something to
+/// condition on beyond what the user has typed since focus.
+///
+/// Falls back cleanly to nothing when unavailable (Electron), where the
+/// keystroke buffer remains the only source. See PROBE.md for coverage.
+@MainActor
+final class ContextProvider {
+    struct Context {
+        var textBeforeCaret: String?
+        var textAfterCaret: String?
+        var caretLocation: Int?
+        var available: Bool { textBeforeCaret != nil }
+    }
+
+    static let lookBehind = 600
+    static let lookAhead = 200
+
+    private let systemWide = AX.systemWide()
+
+    func read() -> Context {
+        var context = Context()
+        guard AXIsProcessTrusted() else { return context }
+        guard let focused = AX.child(systemWide, kAXFocusedUIElementAttribute as String) else { return context }
+        guard let selected = AX.range(focused, kAXSelectedTextRangeAttribute as String) else { return context }
+
+        let caret = selected.location + selected.length
+        context.caretLocation = caret
+
+        let start = max(0, caret - Self.lookBehind)
+        if let before = AX.stringForRange(focused, location: start, length: caret - start) {
+            context.textBeforeCaret = before
+        } else if let whole = AX.string(focused, kAXValueAttribute as String) {
+            // Some apps expose AXValue but not AXStringForRange.
+            let characters = Array(whole)
+            if caret <= characters.count {
+                context.textBeforeCaret = String(characters[max(0, caret - Self.lookBehind)..<caret])
+            }
+        }
+
+        if let total = AX.integer(focused, kAXNumberOfCharactersAttribute as String), total > caret {
+            let length = min(Self.lookAhead, total - caret)
+            context.textAfterCaret = AX.stringForRange(focused, location: caret, length: length)
+        }
+
+        return context
+    }
+}

@@ -20,6 +20,8 @@ final class GhostTextController {
 
     private let tap = EventTapController()
     private let caretTracker = CaretTracker()
+    private let contextProvider = ContextProvider()
+    private let assembler = ContextAssembler()
     private let panel = GhostOverlayPanel()
 
     private let decoder = KeyDecoder(layout: SystemKeyboardLayout())
@@ -40,6 +42,7 @@ final class GhostTextController {
     /// Start of the keystroke that triggered the in-flight suggestion, so the log
     /// records what the user actually experiences rather than just model time.
     private var suggestionRequestedAt: TimeInterval = 0
+    private var lastContextDescription = ""
 
     /// Read from the tap thread on every keydown, written from the main actor.
     /// The tap has to decide synchronously, so it reads this snapshot instead of
@@ -155,7 +158,11 @@ final class GhostTextController {
     private func apply(_ change: BufferChange, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         if change.shouldDismissSuggestion { dismiss() }
 
-        guard change.shouldRequestSuggestion else { return }
+        // Request on any text change rather than only when the buffer alone looks
+        // suggestable. With AX context available the buffer's own state - too
+        // short, or desynced by deleting past its origin - is no longer a reason
+        // to stay silent. fire() re-checks against the assembled prompt.
+        guard change.textChanged || change.shouldRequestSuggestion else { return }
         for command in scheduler.typingOccurred(at: now) {
             switch command {
             case .cancelInFlight, .cancelAll:
@@ -180,9 +187,23 @@ final class GhostTextController {
     private func fire(scheduledFor: TimeInterval) {
         guard scheduler.fireDue(at: scheduledFor) else { return }
 
-        let text = buffer.text
-        guard !text.isEmpty else { return }
+        let contextStart = ProcessInfo.processInfo.systemUptime
+        let context = contextProvider.read()
+        let assembled = assembler.assemble(
+            axTextBeforeCaret: context.textBeforeCaret,
+            keystrokeBuffer: buffer.text,
+            bufferIsSuggestable: buffer.isSuggestable
+        )
+        let contextCost = (ProcessInfo.processInfo.systemUptime - contextStart) * 1000
+
+        // Without AX context the keystroke buffer is all we have, so a desynced
+        // buffer genuinely cannot be trusted.
+        guard assembled.usedAXContext || buffer.isSuggestable else { return }
+
+        let text = assembled.prompt
+        guard text.filter({ !$0.isWhitespace }).count >= 3 else { return }
         suggestionRequestedAt = lastKeystroke
+        lastContextDescription = "ctx=\(assembled.usedAXContext ? "ax" : "buffer")/\(text.count)ch/\(Int(contextCost))ms"
 
         inFlight?.cancel()
         generation &+= 1
@@ -276,7 +297,7 @@ final class GhostTextController {
         let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
             present app=\(candidates.bundleID ?? "?") source=\(placement.source) \
-            e2e=\(Int(endToEnd))ms font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
+            e2e=\(Int(endToEnd))ms \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
             line=\(Int(placement.lineHeight)) origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
             panel=\(panel.panelFrame)
             """)

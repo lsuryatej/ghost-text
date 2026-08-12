@@ -111,6 +111,27 @@ enum AX {
         return result
     }
 
+    /// Reads a window of text by character range.
+    ///
+    /// Preferred over pulling the whole `AXValue`: on a long document that would
+    /// copy the entire text across the AX boundary on every keystroke.
+    static func stringForRange(_ element: AXUIElement, location: Int, length: Int) -> String? {
+        guard length > 0, location >= 0 else { return nil }
+        var request = CFRange(location: location, length: length)
+        guard let argument = AXValueCreate(.cfRange, &request) else { return nil }
+
+        var value: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, argument, &value
+        )
+        guard status == .success else { return nil }
+        return value as? String
+    }
+
+    static func integer(_ element: AXUIElement, _ attribute: String) -> Int? {
+        raw(element, attribute) as? Int
+    }
+
     /// A caret rect is believable when it has real height in a plausible range.
     /// Zero-size rects and absurd heights mean the app handed back garbage.
     static func isPlausibleCaretRect(_ rect: CGRect) -> Bool {
