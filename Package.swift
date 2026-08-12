@@ -9,6 +9,12 @@ let package = Package(
         .library(name: "GhostTextUI", targets: ["GhostTextUI"]),
         .library(name: "GhostTextInference", targets: ["GhostTextInference"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", branch: "main"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.6")),
+        .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+    ],
     targets: [
         // Pure logic. No AppKit behaviour, no AX, no event tap. Everything here
         // is unit-testable in seconds without launching the app.
@@ -19,7 +25,18 @@ let package = Package(
         .target(name: "GhostTextUI", dependencies: ["GhostTextCore"]),
 
         // MLX model loading and generation, behind an actor.
-        .target(name: "GhostTextInference", dependencies: ["GhostTextCore"]),
+        .target(
+            name: "GhostTextInference",
+            dependencies: [
+                "GhostTextCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ]
+        ),
 
         // Wires everything together: menu bar, event tap, AX geometry.
         .executableTarget(
