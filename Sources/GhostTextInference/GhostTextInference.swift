@@ -138,7 +138,16 @@ public actor CompletionEngine {
         return try await container.perform { context in
             let promptTokens = context.tokenizer.encode(text: promptText, addSpecialTokens: true)
             let lmInput = LMInput(tokens: MLXArray(promptTokens))
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.2)
+            // A 0.5B model at low temperature falls into degenerate loops on short
+            // prompts — "The quick " produced "mouse mouse mouse mouse mouse mouse".
+            // The penalty is what breaks the loop; the context size only needs to
+            // span a completion of this length.
+            let parameters = GenerateParameters(
+                maxTokens: maxTokens,
+                temperature: 0.2,
+                repetitionPenalty: 1.15,
+                repetitionContextSize: 20
+            )
 
             let iterator = try TokenIterator(
                 input: lmInput,

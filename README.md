@@ -7,9 +7,9 @@ account, no subscription. Keystrokes never leave the laptop.
 This exists because the heavy lifting already happens on your hardware. Metering that
 behind a paywall is the thing this is meant to undo.
 
-> **Status:** early development. The input path, the overlay and the accept keys all
-> work end to end against real apps. On-device inference is the remaining piece, so
-> what it currently suggests is a placeholder string rather than a prediction.
+> **Status:** early development, but working end to end. Real predictions from a
+> local model appear at the real caret and can be accepted, in real apps. Rough
+> edges remain in suggestion quality, which is a 0.5B model doing its best.
 
 | Piece | State |
 |---|---|
@@ -18,7 +18,7 @@ behind a paywall is the thing this is meant to undo.
 | Caret geometry via Accessibility, with fallback ladder | working in 5 of 6 apps ([PROBE.md](PROBE.md)) |
 | Click-through ghost overlay, screen-edge clamping | working |
 | `Tab` / `~` accept, `Escape` dismiss | working |
-| On-device model | in progress |
+| On-device model, in-process MLX | working, 73-79ms per completion |
 
 ## How it works
 
@@ -54,9 +54,15 @@ a suggestion is up, press `Escape` first.
 Requires macOS 14+, Xcode 26+, and Apple Silicon.
 
 ```sh
+xcodebuild -downloadComponent MetalToolchain   # once per machine
 ./scripts/build.sh
 open "build/Ghost Text.app"
 ```
+
+The build goes through `xcodebuild` rather than `swift build`. That is not a
+preference: mlx-swift has no Metal-shader compile step outside Xcode, so a plain
+`swift build` links fine and then crashes at first inference with "Failed to load
+the default metallib".
 
 Grant **Accessibility** and **Input Monitoring** to the app in System Settings →
 Privacy & Security on first launch.

@@ -26,6 +26,19 @@ enum SelfTest {
             return
         }
 
+        // The tap only comes up once the model is warm, and a cold model means a
+        // download. Wait rather than typing into a disabled tap.
+        var waited = 0.0
+        while !controller.isEnabled, waited < 300 {
+            try? await Task.sleep(for: .milliseconds(500))
+            waited += 0.5
+        }
+        guard controller.isEnabled else {
+            FileLog.app("selftest ABORT: model never became ready")
+            return
+        }
+        FileLog.app(String(format: "selftest: model ready after %.1fs", waited))
+
         guard await focusTarget() else {
             FileLog.app("selftest ABORT: could not bring \(targetBundleID) frontmost")
             return

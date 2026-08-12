@@ -237,4 +237,43 @@ final class CompletionSanitizerTests: XCTestCase {
         let sanitizer = CompletionSanitizer()
         XCTAssertEqual(sanitizer.sanitize(raw: "quick brown fox", buffer: "The quick brown"), " fox")
     }
+
+    // MARK: - Degenerate repetition
+
+    /// The exact output the 0.5B model produced for the buffer "The quick ".
+    func testTruncatesObservedDegenerateLoop() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "mouse mouse mouse mouse mouse mouse", buffer: "The quick "),
+            "mouse mouse"
+        )
+    }
+
+    func testLoopLaterInTheCompletionIsCutAtTheLoop() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "over the lazy dog dog dog dog", buffer: "jumps "),
+            "over the lazy dog dog"
+        )
+    }
+
+    /// Genuine English doubles words; only a third occurrence is a loop.
+    func testLegitimateDoubledWordSurvives() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "had had enough", buffer: "he "), "had had enough")
+    }
+
+    func testRepetitionCheckIsCaseInsensitive() {
+        XCTAssertEqual(
+            CompletionSanitizer.truncateAtDegenerateRepetition("No no NO no"),
+            "No no"
+        )
+    }
+
+    func testNonRepeatingCompletionIsUntouched() {
+        XCTAssertEqual(
+            CompletionSanitizer.truncateAtDegenerateRepetition(" brown fox jumps over"),
+            " brown fox jumps over"
+        )
+    }
 }
