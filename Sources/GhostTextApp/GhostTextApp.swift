@@ -21,7 +21,9 @@ enum Permissions {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let controller = GhostTextController()
     private let probe = AXProbe()
+    private(set) var probeRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -33,8 +35,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Permissions.promptAll()
 
+        GhostTextControllerHolder.shared = controller
         AXProbeHolder.shared = probe
-        probe.start()
+        controller.setEnabled(true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        controller.setEnabled(false)
+    }
+
+    func toggleProbe() {
+        probeRunning.toggle()
+        if probeRunning { probe.start() } else { probe.stop() }
+        FileLog.app("AX probe \(probeRunning ? "started" : "stopped")")
     }
 
     func writeProbeSummary() {
@@ -51,9 +64,14 @@ struct GhostTextApp: App {
     var body: some Scene {
         MenuBarExtra {
             Toggle("Enabled", isOn: $enabled)
+                .onChange(of: enabled) { _, isOn in
+                    delegate.controller.setEnabled(isOn)
+                }
             Divider()
             Button("Request permissions…") { Permissions.promptAll() }
             Button("Log permission status") { FileLog.app(Permissions.report()) }
+            Divider()
+            Button(delegate.probeRunning ? "Stop AX probe" : "Start AX probe") { delegate.toggleProbe() }
             Button("Write AX probe summary") { delegate.writeProbeSummary() }
             Button("Reveal logs in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([FileLog.app.url, FileLog.probe.url])

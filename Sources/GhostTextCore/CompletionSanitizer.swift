@@ -109,21 +109,33 @@ public struct CompletionSanitizer: Sendable {
     /// characters) that is a case-insensitive prefix of `completion`, and
     /// removes it. Small models frequently echo back the tail of the prompt
     /// before continuing it.
+    ///
+    /// Only suffixes that *begin at a word boundary* are considered. Matching any
+    /// suffix would mangle completions on a coincidental one-character overlap:
+    /// a buffer ending in "e" against the completion "elephant" would strip the
+    /// "e" and emit "lephant". Requiring a boundary still catches both real echo
+    /// shapes — a whole repeated word ("The quick brown" + "brown fox" → " fox")
+    /// and a repeated partial word ("The quick brow" + "brown fox" → "n fox").
     private static func dropEchoedContext(_ completion: String, buffer: String) -> String {
         let bufferTail = String(buffer.suffix(40))
         guard !bufferTail.isEmpty else { return completion }
 
+        let characters = Array(bufferTail)
+        let isWholeBuffer = buffer.count <= 40
         let lowerCompletion = completion.lowercased()
-        var bestLength = 0
-        for length in stride(from: bufferTail.count, through: 1, by: -1) {
-            let suffix = String(bufferTail.suffix(length)).lowercased()
-            if lowerCompletion.hasPrefix(suffix) {
-                bestLength = length
-                break
-            }
+
+        // Longest match first, so iterate candidate start offsets ascending.
+        for start in 0..<characters.count {
+            // A truncated tail's first character is mid-word, so it only counts
+            // as a boundary when the tail really is the whole buffer.
+            let atBoundary = start == 0 ? isWholeBuffer : characters[start - 1].isWhitespace
+            guard atBoundary else { continue }
+
+            let candidate = String(characters[start...]).lowercased()
+            guard !candidate.isEmpty, lowerCompletion.hasPrefix(candidate) else { continue }
+            return String(completion.dropFirst(candidate.count))
         }
-        guard bestLength > 0 else { return completion }
-        return String(completion.dropFirst(bestLength))
+        return completion
     }
 
     /// Collapses internal whitespace runs to a single space, and enforces
