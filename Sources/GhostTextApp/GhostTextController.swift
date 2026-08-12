@@ -46,6 +46,7 @@ final class GhostTextController {
     /// records what the user actually experiences rather than just model time.
     private var suggestionRequestedAt: TimeInterval = 0
     private var lastContextDescription = ""
+    private var typedThrough = 0
 
     /// Read from the tap thread on every keydown, written from the main actor.
     /// The tap has to decide synchronously, so it reads this snapshot instead of
@@ -140,6 +141,26 @@ final class GhostTextController {
             apply(buffer.apply(.idleTimeout))
         }
         lastKeystroke = now
+
+        // Typing along a correct suggestion costs no inference: shrink it and
+        // reposition. Without this every keystroke dismissed the suggestion and
+        // waited for a fresh completion, so even a perfect prediction flickered
+        // and lagged for every character of it.
+        if case .text(let character) = key, let completion = currentCompletion, panel.isPresented {
+            switch TypeThrough.apply(character: character, to: completion) {
+            case .consumed(let remaining):
+                _ = buffer.apply(.character(character))
+                lastKeystroke = now
+                currentCompletion = remaining
+                // Re-present rather than only updating the text: the caret has
+                // advanced by one character and the overlay has to follow it.
+                present(completion: remaining, viaTypeThrough: true)
+                typedThrough += 1
+                return
+            case .exhausted, .diverged:
+                break
+            }
+        }
 
         let event: BufferEvent?
         switch key {
@@ -262,7 +283,7 @@ final class GhostTextController {
         }
     }
 
-    private func present(completion: String) {
+    private func present(completion: String, viaTypeThrough: Bool = false) {
         let candidates = caretTracker.sample()
         let height = ScreenGeometry.primaryScreenHeight
 
@@ -303,8 +324,8 @@ final class GhostTextController {
 
         let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
-            present app=\(candidates.bundleID ?? "?") source=\(placement.source) \
-            e2e=\(Int(endToEnd))ms \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
+            \(viaTypeThrough ? "typethrough" : "present") app=\(candidates.bundleID ?? "?") source=\(placement.source) \
+            e2e=\(viaTypeThrough ? 0 : Int(endToEnd))ms tt=\(typedThrough) \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
             line=\(Int(placement.lineHeight)) origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
             panel=\(panel.panelFrame)
             """)

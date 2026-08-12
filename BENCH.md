@@ -28,34 +28,19 @@ re-prefilling the whole buffer on every pause. That's only true if a full re-pro
 ## Latency
 
 <!-- LATENCY:BEGIN -->
-### `mlx-community/gemma-3-1b-it-4bit`
+### `mlx-community/Qwen3-1.7B-4bit`
 
-Cold load (download-if-needed + weight load + first-token Metal kernel compile): **1.62s**
-
-6 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
-
-| Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
-|---|---|---|---|---|---|---|---|
-| 20 chars | 131ms | 132ms | 132ms | 33ms | 33ms | 6ms | 6ms |
-| 50 chars | 166ms | 180ms | 180ms | 33ms | 37ms | 38ms | 51ms |
-| 100 chars | 135ms | 137ms | 137ms | 33ms | 35ms | 6ms | 7ms |
-| 200 chars | 136ms | 773ms | 773ms | 38ms | 675ms | 6ms | 7ms |
-| 400 chars | 150ms | 151ms | 151ms | 40ms | 40ms | 18ms | 19ms |
-
-
-### `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
-
-Cold load (download-if-needed + weight load + first-token Metal kernel compile): **0.63s**
+Cold load (download-if-needed + weight load + first-token Metal kernel compile): **125.71s**
 
 6 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
 
 | Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
 |---|---|---|---|---|---|---|---|
-| 20 chars | 29ms | 43ms | 43ms | 10ms | 11ms | 16ms | 29ms |
-| 50 chars | 39ms | 40ms | 40ms | 11ms | 11ms | 26ms | 26ms |
-| 100 chars | 30ms | 33ms | 33ms | 11ms | 11ms | 16ms | 19ms |
-| 200 chars | 46ms | 48ms | 48ms | 14ms | 14ms | 29ms | 31ms |
-| 400 chars | 37ms | 44ms | 44ms | 14ms | 18ms | 19ms | 26ms |
+| 20 chars | 68ms | 102ms | 102ms | 12ms | 48ms | 48ms | 75ms |
+| 50 chars | 94ms | 110ms | 110ms | 12ms | 24ms | 75ms | 79ms |
+| 100 chars | 68ms | 95ms | 95ms | 12ms | 28ms | 49ms | 60ms |
+| 200 chars | 113ms | 133ms | 133ms | 12ms | 29ms | 95ms | 104ms |
+| 400 chars | 94ms | 114ms | 114ms | 12ms | 30ms | 75ms | 77ms |
 
 
 <!-- LATENCY:END -->

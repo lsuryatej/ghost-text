@@ -16,15 +16,17 @@ struct ModelChoice: Sendable, Equatable, Identifiable {
     var displayName: String { "\(name) (\(String(format: "%.1f", approximateSizeGB)) GB)" }
 
     static let catalog: [ModelChoice] = [
-        // The default. Beats Qwen2.5 0.5B clearly on mid-word continuation -
-        // "reconsi" completes to "ider this approach" rather than "errate" - for
-        // half a gigabyte more and a few milliseconds.
-        ModelChoice(id: "mlx-community/gemma-3-1b-it-4bit", name: "Gemma 3 1B", approximateSizeGB: 0.8, recommended: true),
-        // Fastest, and the fallback if a smaller footprint matters.
-        ModelChoice(id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", name: "Qwen2.5 0.5B", approximateSizeGB: 0.3, recommended: true),
+        // The default. 70-74ms end to end in the app - as fast as the 0.5B while
+        // being three times the size, because decode cost tracks vocabulary as
+        // much as parameter count and Qwen's 151k vocab is far cheaper than
+        // Gemma's 262k. Measured in BENCH.md.
         ModelChoice(id: "mlx-community/Qwen3-1.7B-4bit", name: "Qwen3 1.7B", approximateSizeGB: 1.0, recommended: true),
+        // Smallest footprint, weakest mid-word continuation.
+        ModelChoice(id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", name: "Qwen2.5 0.5B", approximateSizeGB: 0.3, recommended: true),
+        // Good prose, but 550-850ms in app conditions. Kept for comparison.
+        ModelChoice(id: "mlx-community/gemma-3-1b-it-4bit", name: "Gemma 3 1B (slow)", approximateSizeGB: 0.8, recommended: false),
         ModelChoice(id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit", name: "Qwen2.5 1.5B", approximateSizeGB: 0.9, recommended: false),
-        ModelChoice(id: "mlx-community/gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B", approximateSizeGB: 2.3, recommended: true),
+        ModelChoice(id: "mlx-community/gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B", approximateSizeGB: 2.3, recommended: false),
         // What Cotypist is currently running here.
         ModelChoice(id: "mlx-community/gemma-4-e2b-it-4bit", name: "Gemma 4 E2B", approximateSizeGB: 3.2, recommended: true),
         ModelChoice(id: "mlx-community/Qwen3-4B-Instruct-2507-4bit", name: "Qwen3 4B", approximateSizeGB: 2.3, recommended: false),
@@ -34,7 +36,7 @@ struct ModelChoice: Sendable, Equatable, Identifiable {
 
     /// Looked up by id rather than by position, so reordering the catalog cannot
     /// silently change what everyone gets.
-    static let fallback = catalog.first { $0.id == "mlx-community/gemma-3-1b-it-4bit" } ?? catalog[0]
+    static let fallback = catalog.first { $0.id == "mlx-community/Qwen3-1.7B-4bit" } ?? catalog[0]
 
     static var current: ModelChoice {
         get {
