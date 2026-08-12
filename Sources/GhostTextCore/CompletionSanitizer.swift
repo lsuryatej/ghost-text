@@ -97,11 +97,23 @@ public struct CompletionSanitizer: Sendable {
 
     // MARK: - Pipeline stages
 
+    /// Drops leading newlines, then keeps only the first line.
+    ///
+    /// Small models often open with a stray newline or two before saying anything
+    /// useful. Truncating at the *first* newline turned those into empty strings
+    /// and threw the completion away - one real example was a leading "\n\n"
+    /// discarding an otherwise complete sentence. Leading newlines are formatting
+    /// noise, not content, so skip past them before cutting.
     private static func truncateAtNewline(_ raw: String) -> String {
-        if let newlineIndex = raw.firstIndex(where: { $0.isNewline }) {
-            return String(raw[raw.startIndex..<newlineIndex])
+        var start = raw.startIndex
+        while start < raw.endIndex, raw[start].isNewline {
+            start = raw.index(after: start)
         }
-        return raw
+        let body = raw[start...]
+        if let newlineIndex = body.firstIndex(where: { $0.isNewline }) {
+            return String(body[body.startIndex..<newlineIndex])
+        }
+        return String(body)
     }
 
     /// Strips matching wrapping quotes / markdown emphasis markers

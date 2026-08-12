@@ -24,12 +24,18 @@ final class GhostTextController {
     private let resolver = CaretResolver()
 
     private var buffer = KeystrokeBuffer()
-    private var scheduler = SuggestionScheduler()
+    /// The debounce, not inference, was the dominant term in perceived latency:
+    /// 250ms of waiting in front of a 75ms completion. Inference at ~20ms prefill
+    /// is cheap enough that firing eagerly and cancelling is the better trade.
+    private var scheduler = SuggestionScheduler(quietPeriod: 0.09)
     private var lastKnownGood: LastKnownGood?
     private var currentCompletion: String?
     private var pendingFire: DispatchWorkItem?
     private var inFlight: Task<Void, Never>?
     private var lastKeystroke: TimeInterval = 0
+    /// Start of the keystroke that triggered the in-flight suggestion, so the log
+    /// records what the user actually experiences rather than just model time.
+    private var suggestionRequestedAt: TimeInterval = 0
 
     /// Read from the tap thread on every keydown, written from the main actor.
     /// The tap has to decide synchronously, so it reads this snapshot instead of
@@ -172,6 +178,7 @@ final class GhostTextController {
 
         let text = buffer.text
         guard !text.isEmpty else { return }
+        suggestionRequestedAt = lastKeystroke
 
         inFlight?.cancel()
         inFlight = Task { [weak self, sanitizer] in
@@ -235,9 +242,11 @@ final class GhostTextController {
             )
         }
 
+        let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
             present app=\(candidates.bundleID ?? "?") source=\(placement.source) \
-            origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) panel=\(panel.panelFrame)
+            e2e=\(Int(endToEnd))ms origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
+            panel=\(panel.panelFrame)
             """)
     }
 
