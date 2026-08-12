@@ -432,4 +432,62 @@ final class CaretResolverTests: XCTestCase {
         let flipped = AXCoordinates.flipToAppKit(rect: axRect, primaryScreenHeight: 1080)
         XCTAssertEqual(flipped.origin.y, 0, accuracy: 0.001)
     }
+
+    // MARK: - Collapsed carets (regression)
+
+    /// Real caret rects from PROBE.md. Every one of these was previously rejected
+    /// for having zero or near-zero width, which silently dropped the AX-first
+    /// path onto the element-frame fallback in every app that actually works.
+    func testRealWorldCaretRectsResolveAsAXRange() {
+        let resolver = CaretResolver()
+        let observed: [(String, CGRect)] = [
+            ("TextEdit", CGRect(x: 157, y: 159, width: 0, height: 14)),
+            ("Safari", CGRect(x: 347, y: 235, width: 2, height: 19)),
+            ("Brave", CGRect(x: 342, y: 224, width: 0, height: 20)),
+            ("Notes", CGRect(x: 980, y: 94, width: 0, height: 23)),
+            ("Terminal", CGRect(x: 17, y: 786, width: 7, height: 14)),
+        ]
+        for (app, rect) in observed {
+            let result = resolver.resolve(
+                axRangeBounds: rect,
+                focusedElementFrame: CGRect(x: 0, y: 0, width: 800, height: 600),
+                focusedWindowFrame: nil,
+                lastKnownGood: nil,
+                currentBundleID: "com.test.app",
+                now: 0,
+                screens: [mainScreen]
+            )
+            XCTAssertEqual(result?.source, .axRange, "\(app) should use the caret rect, not a fallback")
+            XCTAssertEqual(result?.origin, CGPoint(x: rect.minX, y: rect.minY), "\(app) origin")
+        }
+    }
+
+    /// The Electron shape: attribute advertised, rect meaningless. Must fall through.
+    func testElectronZeroSizeRectFallsThroughToElement() {
+        let resolver = CaretResolver()
+        let result = resolver.resolve(
+            axRangeBounds: CGRect(x: 0, y: 982, width: 0, height: 0),
+            focusedElementFrame: CGRect(x: 10, y: 20, width: 800, height: 600),
+            focusedWindowFrame: nil,
+            lastKnownGood: nil,
+            currentBundleID: "com.test.app",
+            now: 0,
+            screens: [mainScreen]
+        )
+        XCTAssertEqual(result?.source, .axElement)
+    }
+
+    func testZeroWidthCaretFullyOffScreenIsRejected() {
+        let resolver = CaretResolver()
+        let result = resolver.resolve(
+            axRangeBounds: CGRect(x: 5000, y: 200, width: 0, height: 18),
+            focusedElementFrame: nil,
+            focusedWindowFrame: nil,
+            lastKnownGood: nil,
+            currentBundleID: "com.test.app",
+            now: 0,
+            screens: [mainScreen]
+        )
+        XCTAssertNil(result)
+    }
 }

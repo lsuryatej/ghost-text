@@ -63,9 +63,9 @@ final class GhostTextController {
         guard enabled != isEnabled else { return }
 
         if enabled {
-            tap.setDecider { [decoder, acceptPolicy, snapshot] keyCode, flags in
+            tap.setDecider { [decoder, acceptPolicy, snapshot] keyCode, flags, character in
                 let current = snapshot.withLock { $0 }
-                let key = decoder.decode(keyCode: keyCode, modifiers: ModifierSet(flags))
+                let key = Self.resolveKey(decoder: decoder, keyCode: keyCode, flags: flags, character: character)
                 let decision = acceptPolicy.decide(
                     key: key,
                     suggestionVisible: current.suggestionVisible,
@@ -74,8 +74,8 @@ final class GhostTextController {
                 return decision == .passThrough ? .pass : .swallow
             }
 
-            tap.setObserver { [weak self] keyCode, flags, swallowed in
-                self?.handle(keyCode: keyCode, flags: flags, swallowed: swallowed)
+            tap.setObserver { [weak self] keyCode, flags, character, swallowed in
+                self?.handle(keyCode: keyCode, flags: flags, character: character, swallowed: swallowed)
             }
 
             guard tap.start() else {
@@ -104,8 +104,8 @@ final class GhostTextController {
 
     // MARK: - Key handling
 
-    private func handle(keyCode: UInt16, flags: CGEventFlags, swallowed: Bool) {
-        let key = decoder.decode(keyCode: keyCode, modifiers: ModifierSet(flags))
+    private func handle(keyCode: UInt16, flags: CGEventFlags, character: Character?, swallowed: Bool) {
+        let key = Self.resolveKey(decoder: decoder, keyCode: keyCode, flags: flags, character: character)
         let now = ProcessInfo.processInfo.systemUptime
 
         // A swallowed key can only mean one of the three accept actions — the
@@ -176,7 +176,10 @@ final class GhostTextController {
         inFlight?.cancel()
         inFlight = Task { [weak self, sanitizer] in
             guard let provider = await self?.completionProvider else {
-                await self?.present(completion: Self.placeholderCompletion)
+                // Placeholder still goes through the sanitizer, so the no-model
+                // path behaves exactly like the real one.
+                guard let cleaned = sanitizer.sanitize(raw: Self.placeholderCompletion, buffer: text) else { return }
+                await self?.present(completion: cleaned)
                 return
             }
             let started = ProcessInfo.processInfo.systemUptime
@@ -270,7 +273,36 @@ final class GhostTextController {
         inFlight = nil
     }
 
+    /// Trusts the system-resolved character over a keycode re-translation for
+    /// anything printable, while leaving Tab, Escape, Return and Backspace to the
+    /// decoder — those carry control characters that must stay classified as keys.
+    nonisolated static func resolveKey(
+        decoder: KeyDecoder,
+        keyCode: UInt16,
+        flags: CGEventFlags,
+        character: Character?
+    ) -> DecodedKey {
+        let base = decoder.decode(keyCode: keyCode, modifiers: ModifierSet(flags))
+        guard let character, isPrintable(character) else { return base }
+        switch base {
+        case .text, .ignored: return .text(character)
+        default: return base
+        }
+    }
+
+    nonisolated private static func isPrintable(_ character: Character) -> Bool {
+        !character.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+    }
+
     private static let placeholderCompletion = " brown fox jumps"
+
+    /// Compact state dump for the self-test log.
+    func debugState() -> String {
+        let visible = snapshot.withLock { $0.suggestionVisible }
+        return "buffer=\(buffer.text.debugDescription) suggestable=\(buffer.isSuggestable) "
+            + "visible=\(visible) completion=\(currentCompletion?.debugDescription ?? "nil") "
+            + "panel=\(panel.isPresented ? "\(panel.panelFrame)" : "hidden")"
+    }
 }
 
 /// Notification closures need a reference that does not capture `self` during init.

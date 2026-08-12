@@ -18,9 +18,9 @@ enum TapDecision: Sendable {
 /// Blocking here lags typing in every app on the machine.
 final class EventTapController: @unchecked Sendable {
     /// Runs on the tap thread, synchronously, on every keydown. Must be fast.
-    typealias Decider = @Sendable (_ keyCode: UInt16, _ flags: CGEventFlags) -> TapDecision
+    typealias Decider = @Sendable (_ keyCode: UInt16, _ flags: CGEventFlags, _ character: Character?) -> TapDecision
     /// Runs on the main actor, after the fact. Free to be slow.
-    typealias Observer = @MainActor (_ keyCode: UInt16, _ flags: CGEventFlags, _ swallowed: Bool) -> Void
+    typealias Observer = @MainActor (_ keyCode: UInt16, _ flags: CGEventFlags, _ character: Character?, _ swallowed: Bool) -> Void
 
     /// Stamped onto every event we synthesize so the tap can recognise its own
     /// output. Without this, accepting a completion feeds the synthesized
@@ -141,20 +141,39 @@ final class EventTapController: @unchecked Sendable {
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+        let character = Self.character(from: event)
 
         let snapshot = state.withLock { ($0.enabled, $0.decider, $0.observer) }
         guard snapshot.0 else { return Unmanaged.passUnretained(event) }
 
-        let decision = snapshot.1?(keyCode, flags) ?? .pass
+        let decision = snapshot.1?(keyCode, flags, character) ?? .pass
 
         if let observer = snapshot.2 {
             let swallowed = decision == .swallow
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { observer(keyCode, flags, swallowed) }
+                MainActor.assumeIsolated { observer(keyCode, flags, character, swallowed) }
             }
         }
 
         return decision == .swallow ? nil : Unmanaged.passUnretained(event)
+    }
+}
+
+extension EventTapController {
+    /// The character the system itself resolved for this event.
+    ///
+    /// Preferring this over re-deriving from the keycode matters: it already
+    /// accounts for dead keys, IME composition, non-US layouts, and events
+    /// injected by text expanders, which carry a unicode payload with a keycode
+    /// that means nothing.
+    static func character(from event: CGEvent) -> Character? {
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 4)
+        event.keyboardGetUnicodeString(maxStringLength: 4, actualStringLength: &length, unicodeString: &buffer)
+        guard length > 0 else { return nil }
+        let string = String(utf16CodeUnits: buffer, count: length)
+        guard string.count == 1, let character = string.first else { return nil }
+        return character
     }
 }
 

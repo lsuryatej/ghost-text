@@ -98,9 +98,7 @@ public struct CaretResolver: Sendable {
         now: TimeInterval,
         screens: [CGRect]
     ) -> CaretPlacement? {
-        if let rect = axRangeBounds,
-            Self.isSane(rect, minHeight: Self.axRangeMinHeight, maxHeight: Self.axRangeMaxHeight, screens: screens)
-        {
+        if let rect = axRangeBounds, Self.isSaneCaret(rect, screens: screens) {
             return CaretPlacement(
                 origin: CGPoint(x: rect.minX, y: rect.minY),
                 lineHeight: rect.height,
@@ -141,11 +139,25 @@ public struct CaretResolver: Sendable {
         return nil
     }
 
-    /// Non-zero size, height within `[minHeight, maxHeight]`, and
-    /// intersects at least one known screen.
-    private static func isSane(_ rect: CGRect, minHeight: CGFloat, maxHeight: CGFloat, screens: [CGRect]) -> Bool {
-        guard rect.width > 0, rect.height > 0 else { return false }
-        guard rect.height >= minHeight, rect.height <= maxHeight else { return false }
-        return screens.contains { $0.intersects(rect) }
+    /// A believable caret rect.
+    ///
+    /// Deliberately does **not** require non-zero width. A collapsed insertion
+    /// point legitimately has none, and every app that works — TextEdit, Safari,
+    /// Brave, Notes — reports a caret 0 to 2 points wide. Requiring width here
+    /// silently rejected all of them and dropped the whole AX-first path onto the
+    /// element-frame fallback, parking the overlay at the corner of the text area
+    /// instead of at the caret. Height and a finite on-screen origin are what
+    /// actually separate a real caret from the `(0,982 0×0)` that Electron returns.
+    private static func isSaneCaret(_ rect: CGRect, screens: [CGRect]) -> Bool {
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite else { return false }
+        guard rect.height >= Self.axRangeMinHeight, rect.height <= Self.axRangeMaxHeight else { return false }
+        guard rect.width >= 0, rect.width < Self.caretMaxWidth else { return false }
+
+        // CGRect.intersects is false for any empty rect, so a zero-width caret
+        // would fail an on-screen test against itself. Probe with a widened copy.
+        let probe = CGRect(x: rect.minX, y: rect.minY, width: max(rect.width, 1), height: rect.height)
+        return screens.contains { $0.intersects(probe) }
     }
+
+    private static let caretMaxWidth: CGFloat = 4000
 }
