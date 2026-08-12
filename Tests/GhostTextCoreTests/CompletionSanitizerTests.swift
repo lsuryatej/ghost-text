@@ -276,4 +276,28 @@ final class CompletionSanitizerTests: XCTestCase {
             " brown fox jumps over"
         )
     }
+
+    // MARK: - Leading newlines
+
+    /// Observed live: a leading "\n\n" made the whole completion vanish.
+    func testLeadingNewlinesAreSkippedNotTruncatedAt() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "\n\nThe sun set behind", buffer: "he wrote "),
+            "The sun set behind"
+        )
+    }
+
+    func testStillTruncatesAtNewlineAfterContent() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "\nfirst line\nsecond line", buffer: "he wrote "),
+            "first line"
+        )
+    }
+
+    func testAllNewlinesIsStillRejected() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertNil(sanitizer.sanitize(raw: "\n\n\n", buffer: "he wrote "))
+    }
 }
