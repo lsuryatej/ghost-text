@@ -261,7 +261,7 @@ final class GhostTextController {
             text: completion,
             at: placement.origin,
             lineHeight: placement.lineHeight,
-            fontSize: candidates.fontSize ?? 13
+            font: candidates.font ?? NSFont.systemFont(ofSize: 13)
         )
         snapshot.withLock { $0.suggestionVisible = true }
 
@@ -276,7 +276,8 @@ final class GhostTextController {
         let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
             present app=\(candidates.bundleID ?? "?") source=\(placement.source) \
-            e2e=\(Int(endToEnd))ms origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
+            e2e=\(Int(endToEnd))ms font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
+            line=\(Int(placement.lineHeight)) origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
             panel=\(panel.panelFrame)
             """)
     }

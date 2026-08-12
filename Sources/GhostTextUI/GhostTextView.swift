@@ -13,11 +13,11 @@ final class GhostTextView: NSView {
 
     private var attributedString = NSAttributedString()
 
-    func configure(text: String, fontSize: CGFloat) {
+    func configure(text: String, font: NSFont) {
         attributedString = NSAttributedString(
             string: text,
             attributes: [
-                .font: NSFont.systemFont(ofSize: fontSize),
+                .font: font,
                 .foregroundColor: NSColor.tertiaryLabelColor,
             ]
         )

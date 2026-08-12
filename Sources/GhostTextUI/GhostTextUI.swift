@@ -78,11 +78,11 @@ public final class GhostOverlayPanel {
     ///     log the surrounding line band.
     ///   - fontSize: Size for the ghost text's system font. Pass the caret
     ///     line's actual font size so the baseline alignment reads true.
-    public func present(text: String, at origin: CGPoint, lineHeight: CGFloat, fontSize: CGFloat) {
+    public func present(text: String, at origin: CGPoint, lineHeight: CGFloat, font: NSFont) {
         anchorOrigin = origin
         anchorLineHeight = lineHeight
-        anchorFontSize = fontSize
-        view.configure(text: text, fontSize: fontSize)
+        anchorFont = font
+        view.configure(text: text, font: font)
         relayout()
         if !isPresented {
             panel.orderFrontRegardless()
@@ -94,8 +94,8 @@ public final class GhostOverlayPanel {
     /// point with no flicker and, critically, no re-ordering in the window
     /// server's z-order (no `orderFrontRegardless` call here).
     public func update(text: String) {
-        guard isPresented, let fontSize = anchorFontSize else { return }
-        view.configure(text: text, fontSize: fontSize)
+        guard isPresented, let font = anchorFont else { return }
+        view.configure(text: text, font: font)
         relayout()
     }
 
@@ -110,7 +110,10 @@ public final class GhostOverlayPanel {
     /// Padding around the natural text bounding box. Present even with the
     /// backdrop off, so glyph edges (italics, overshoot) never clip against
     /// the panel bounds.
-    static let padding = CGSize(width: 4, height: 2)
+    /// No horizontal padding: ghost text must begin exactly at the caret, not
+    /// a few points to its right. Vertical padding only guards glyph overshoot
+    /// and is compensated for in the baseline maths below.
+    static let padding = CGSize(width: 0, height: 1)
 
     private func relayout() {
         guard let origin = anchorOrigin else { return }
@@ -166,5 +169,5 @@ public final class GhostOverlayPanel {
     private let view: GhostTextView
     private var anchorOrigin: CGPoint?
     private var anchorLineHeight: CGFloat?
-    private var anchorFontSize: CGFloat?
+    private var anchorFont: NSFont?
 }

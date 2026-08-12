@@ -60,7 +60,7 @@ private final class DemoRunner {
         if c.isUpdateOnly {
             panel.update(text: c.text)
         } else {
-            panel.present(text: c.text, at: c.origin, lineHeight: c.lineHeight, fontSize: c.fontSize)
+            panel.present(text: c.text, at: c.origin, lineHeight: c.lineHeight, font: NSFont.systemFont(ofSize: c.fontSize))
         }
 
         let screenFrame = panel.resolvedScreenFrame.map(Self.describe) ?? "none"

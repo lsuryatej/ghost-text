@@ -16,9 +16,10 @@ final class CaretTracker {
         var focusedElementFrame: CGRect?
         var focusedWindowFrame: CGRect?
         var bundleID: String?
-        /// Derived from caret height — no app reliably exposes its font size, and
-        /// the overlay needs a close match or the ghost text sits off the baseline.
-        var fontSize: CGFloat?
+        /// The real font of the text at the caret, read from Accessibility.
+        /// Guessing this is what made ghost text render like a superscript:
+        /// wrong typeface and a size derived from caret height.
+        var font: NSFont?
         var lineHeight: CGFloat?
     }
 
@@ -54,11 +55,46 @@ final class CaretTracker {
             if let rect, AX.isPlausibleCaretRect(rect) {
                 candidates.axRangeBounds = rect
                 candidates.lineHeight = rect.height
-                candidates.fontSize = min(48, max(9, rect.height * 0.72))
+                candidates.font = Self.font(for: focused, at: caretLocation)
+                    ?? Self.derivedFont(caretHeight: rect.height)
             }
         }
 
         return candidates
+    }
+
+    /// The actual font at the caret, via `AXAttributedStringForRange` over the
+    /// character just before it. TextEdit, Safari, Notes and Terminal all vend
+    /// this (see PROBE.md); apps that do not fall back to a derived size.
+    static func font(for element: AXUIElement, at location: Int) -> NSFont? {
+        var range = CFRange(location: max(0, location - 1), length: 1)
+        guard location > 0, let argument = AXValueCreate(.cfRange, &range) else { return nil }
+
+        var value: CFTypeRef?
+        let status = AXUIElementCopyParameterizedAttributeValue(
+            element, "AXAttributedStringForRange" as CFString, argument, &value
+        )
+        guard status == .success, let attributed = value as? NSAttributedString, attributed.length > 0 else {
+            return nil
+        }
+
+        let attributes = attributed.attributes(at: 0, effectiveRange: nil)
+        // Two shapes in the wild: a real NSFont, or AX's own dictionary form.
+        if let font = attributes[.font] as? NSFont { return font }
+        if let descriptor = attributes[NSAttributedString.Key("AXFont")] as? [String: Any] {
+            let size = (descriptor["AXFontSize"] as? CGFloat) ?? 13
+            if let name = descriptor["AXFontName"] as? String, let font = NSFont(name: name, size: size) {
+                return font
+            }
+            return NSFont.systemFont(ofSize: size)
+        }
+        return nil
+    }
+
+    /// Last resort. A caret rect spans the full line box, so back out a plausible
+    /// point size from it rather than using it directly.
+    static func derivedFont(caretHeight: CGFloat) -> NSFont {
+        NSFont.systemFont(ofSize: min(48, max(9, (caretHeight / 1.18).rounded())))
     }
 
     private func windowFrame(for app: NSRunningApplication?) -> CGRect? {
