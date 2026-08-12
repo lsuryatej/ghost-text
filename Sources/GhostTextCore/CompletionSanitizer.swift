@@ -17,16 +17,34 @@ public struct CompletionSanitizer: Sendable {
     /// survives (empty, whitespace-only, or pure punctuation) -- callers
     /// should treat `nil` exactly like "no suggestion."
     public func sanitize(raw: String, buffer: String) -> String? {
-        var work = Self.truncateAtNewline(raw)
+        var work = Self.truncateAtSpecialToken(raw)
+        work = Self.truncateAtNewline(work)
         work = Self.stripWrappingArtifacts(work)
         work = Self.stripLeadingEllipsis(work)
         work = Self.dropEchoedContext(work, buffer: buffer)
+        work = Self.dropRestartedWord(work, buffer: buffer)
         work = Self.normalizeWhitespace(work, bufferEndsInWhitespace: buffer.last?.isWhitespace ?? false)
         work = Self.truncateAtDegenerateRepetition(work)
         work = Self.capWords(work, maxWords: maxWords)
 
         guard Self.isMeaningful(work) else { return nil }
         return work
+    }
+
+    /// Cuts at a chat-template terminator that leaked into the output.
+    ///
+    /// Registering them as stop tokens is the real fix, but a model can still
+    /// emit a terminator the loader did not know about, and the failure is ugly:
+    /// Gemma produced "ing.<end_of_turn>" followed by tokens from several other
+    /// scripts. Belt and braces, since the cost is one substring scan.
+    static func truncateAtSpecialToken(_ raw: String) -> String {
+        var cut = raw.endIndex
+        for marker in ["<end_of_turn>", "<start_of_turn>", "<|im_end|>", "<|im_start|>", "<|endoftext|>", "<eos>", "<bos>", "<think>"] {
+            if let range = raw.range(of: marker), range.lowerBound < cut {
+                cut = range.lowerBound
+            }
+        }
+        return String(raw[raw.startIndex..<cut])
     }
 
     /// Removes a leading ellipsis.
@@ -208,9 +226,45 @@ public struct CompletionSanitizer: Sendable {
 
             let candidate = String(characters[start...]).lowercased()
             guard !candidate.isEmpty, lowerCompletion.hasPrefix(candidate) else { continue }
-            return String(completion.dropFirst(candidate.count))
+
+            // The match must end a word. If a letter follows, the completion is
+            // continuing a word the user is midway through rather than repeating
+            // one, which is `dropRestartedWord`'s job and has its own minimum
+            // length. Without this, buffer "an a" against "apple pie" strips the
+            // "a" and yields "pple pie".
+            let remainder = completion.dropFirst(candidate.count)
+            if let next = remainder.first, next.isLetter { continue }
+            return String(remainder)
         }
         return completion
+    }
+
+    /// Handles a model that restarts the word the user is midway through typing.
+    ///
+    /// Asked to continue "Can you send me the quarterly rep", models often answer
+    /// " report?" - the whole word, with a leading space - which would render as
+    /// "quarterly rep report?". Detect that the completion's first word begins
+    /// with the fragment still being typed, and drop the duplicated fragment.
+    ///
+    /// Only fires when the buffer really does end mid-word, so a completion that
+    /// legitimately repeats a just-finished word is left alone.
+    static func dropRestartedWord(_ completion: String, buffer: String) -> String {
+        guard let lastCharacter = buffer.last, !lastCharacter.isWhitespace else { return completion }
+
+        let fragment = String(buffer.reversed().prefix(while: { $0.isLetter }).reversed())
+        guard fragment.count >= 2 else { return completion }
+
+        let trimmed = completion.drop(while: { $0.isWhitespace })
+        guard trimmed.count > fragment.count else { return completion }
+
+        let candidate = String(trimmed)
+        guard candidate.lowercased().hasPrefix(fragment.lowercased()) else { return completion }
+
+        // The next character must continue the word rather than end it, otherwise
+        // the model simply repeated a complete word and dropping it would be wrong.
+        let remainder = String(candidate.dropFirst(fragment.count))
+        guard let next = remainder.first, next.isLetter else { return completion }
+        return remainder
     }
 
     /// Collapses internal whitespace runs to a single space, and enforces

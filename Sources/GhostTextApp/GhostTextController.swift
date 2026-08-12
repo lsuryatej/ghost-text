@@ -16,6 +16,9 @@ final class GhostTextController {
     /// Set once the model is warm. Held directly rather than behind a closure so
     /// the streaming callback can be driven without extra hops.
     var engine: CompletionEngine?
+    /// Re-read per suggestion so edits to the instructions file take effect
+    /// without a restart. The store throttles the actual stat call.
+    var instructionsProvider: (@MainActor () -> String?)?
     private var generation = 0
 
     private let tap = EventTapController()
@@ -219,7 +222,9 @@ final class GhostTextController {
             return
         }
 
+        let instructions = instructionsProvider?()
         inFlight = Task { [weak self, sanitizer] in
+            await engine.setInstructions(instructions)
             let started = ProcessInfo.processInfo.systemUptime
 
             // Paint on the first token instead of waiting for the whole
