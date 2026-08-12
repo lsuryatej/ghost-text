@@ -15,10 +15,10 @@ started. A wrong tick makes the whole list useless, so when in doubt it is `[~]`
 | 6. Multilingual | `[~]` | Key decoding is layout-correct via UCKeyTranslate and handles IME/dead keys; the model is English-weighted |
 | 7. Context acquisition | `[~]` | Text before *and after* the caret, 600/200 char window, both fed to the model. No screen or clipboard context |
 | 8-9. Personalization | `[ ]` | Nothing is learned or stored. Deliberate for now — see non-goals |
-| 10. Custom AI instructions | `[ ]` | Not started |
+| 10. Custom AI instructions | `[~]` | Global instructions via a text file, hot-reloaded. No per-app or per-domain |
 | 11. Completion length | `[~]` | Boundary-stop at sentence/newline/~8 words; not user-configurable |
-| 12. Local model layer | `[~]` | Two models, switchable from the menu without restart. No download UI or progress |
-| 13. Low-latency inference | `[x]` | Debounce, cancellation, warm model, streaming, boundary-stop, off-main-thread. 67-94ms end to end |
+| 12. Local model layer | `[~]` | Nine models mirroring Cotypist's lineup, switchable from the menu without restart, download progress in the menu title. No catalog management |
+| 13. Low-latency inference | `[x]` | Debounce, cancellation, streaming, boundary-stop, prefix KV cache, type-through, instant fallback. 70-110ms, 0ms when typing through |
 | 14. Ranking / filtering | `[x]` | Empty, echo, repetition, markdown and whitespace all handled in `CompletionSanitizer` |
 | 15. Inline rendering | `[x]` | Click-through overlay, real font from AX, baseline-aligned, screen-edge clamped |
 | 16. Field-level UI | `[ ]` | No per-field affordance |
@@ -81,31 +81,56 @@ started. A wrong tick makes the whole list useless, so when in doubt it is `[~]`
 
 ## What's next
 
-Ordered by what makes this better to use daily, which given the feedback so far
-means quality and control before breadth.
+Everything below is measured or diagnosed, not speculative. Numbers live in
+`BENCH.md`.
 
-**1. Mid-word completion (P0, the sharpest remaining quality gap).**
-Both models produce nonsense when the caret sits inside a partial word: "gorg" ->
-"onzola", "all-purp" -> "ulent", "reconsi" -> "errate". Whole-word contexts are
-fine, so this is specifically about continuing a token fragment through ChatML
-framing. Worth trying raw framing for the fragment case, or a base model, or
-suppressing suggestions mid-word entirely until it is solved.
+**1. Re-test suggestion quality first, before building anything.**
+Concurrent generations were corrupting the KV cache, which made the model emit
+the same hallucinated digits for unrelated prompts and probably caused the
+near-miss words too ("createt" for "create", "sinces" for "since"). That is
+fixed but the quality result has not been judged by a person yet. If word
+completions are now sound, the quality complaint is largely answered and the
+remaining work is speed polish. If they are still wrong, it is a real model
+weakness and needs a different attack. **Do not start optimising until this is
+known** - it decides whether items 2 and 3 are worth doing at all.
 
-**2. Download UI and a wider catalog (§12, §31, P1).** Switching between two
-models now works from the menu; what is missing is download progress (the 1.5B
-takes ~107s on first use with no feedback) and more choices.
+**2. Prompt Lookup Decoding (P0-ish, speed).**
+Model-agnostic speculative decoding that drafts by matching n-grams already
+present in the prompt. No draft model, nothing to download, reported 2-2.65x on
+Apple Silicon. Our prompts carry 600 characters of the user's own document,
+which is close to the ideal case for it. `mlx-swift-lm` ships
+`SpeculativeDecodingConfig`, though it is wired for `ChatSession` rather than
+the `TokenIterator` path this project uses.
 
-**3. Shortcut customisation and per-app toggle (§3, P0).** `Tab` is right for
-prose and wrong in some apps. Users need to rebind it and to disable Ghost Text
-per app. The `AcceptPolicy.deniedBundleIDs` hook already exists and is empty.
+**3. Parked generation (speed).**
+Start generating during the 45ms debounce instead of after it, and discard if
+the user keeps typing. Cheap now that superseded requests are dropped before
+they touch the model.
 
-**4. A settings window (§32, P0).** Everything above needs somewhere to live.
+**4. Shortcut customisation and per-app disable (§3, P0).**
+`Tab` suits prose and not every app. `AcceptPolicy.deniedBundleIDs` already
+exists and is empty, so the mechanism is there.
 
-**5. Personalization (§8-9, P1).** The largest remaining Cotypist differentiator,
-and the most privacy-sensitive. Needs the encrypted local store designed before
-any collection starts.
+**5. A settings window (§32, P0).**
+Model choice, instructions and shortcuts all currently live in a menu or a text
+file. Once there are three of them it wants a real home.
 
-Then: autocorrect (§4), statistics (§28), mid-line completion (§33.1).
+**6. Personalization (§8-9, P1).**
+The largest remaining Cotypist differentiator and the most privacy-sensitive.
+Design the encrypted local store before collecting anything.
+
+### Known open issues
+
+- **Mid-word completion quality** is the weakest area and the thing to judge
+  first. See item 1.
+- **Gemma models are ~8x slower than their parameter count suggests** because
+  decode cost tracks vocabulary size: Gemma's 262k against Qwen's 151k. Gemma 3
+  1B costs 550-850ms against Qwen3 1.7B's 70-110ms despite being smaller. Worth
+  remembering before adding any Gemma to the recommended list.
+- **No download progress bar**, only a percentage in the menu title. The 6GB
+  models will look frozen for minutes.
+- **Two browser tabs** were left open by an early AX probe run
+  (`caret-probe.html` in Safari and Brave). Harmless, just clutter.
 
 ## Deliberate non-goals
 

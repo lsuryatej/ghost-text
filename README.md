@@ -8,8 +8,8 @@ This exists because the heavy lifting already happens on your hardware. Metering
 behind a paywall is the thing this is meant to undo.
 
 > **Status:** early development, but working end to end. Real predictions from a
-> local model appear at the real caret and can be accepted, in real apps. Rough
-> edges remain in suggestion quality, which is a 0.5B model doing its best.
+> local model appear at the real caret and can be accepted, in real apps.
+> Suggestion quality is the weakest area; see [STATUS.md](STATUS.md).
 
 | Piece | State |
 |---|---|
@@ -18,7 +18,8 @@ behind a paywall is the thing this is meant to undo.
 | Caret geometry via Accessibility, with fallback ladder | working in 5 of 6 apps ([PROBE.md](PROBE.md)) |
 | Click-through ghost overlay, screen-edge clamping | working |
 | `Tab` / `~` accept, `Escape` dismiss | working |
-| On-device model, in-process MLX | working, 73-79ms per completion |
+| On-device model, in-process MLX | working, 70-110ms; 0ms when typing along a suggestion |
+| Model catalog (9 models), custom instructions | working |
 
 ## How it works
 
