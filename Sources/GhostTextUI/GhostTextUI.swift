@@ -115,6 +115,10 @@ public final class GhostOverlayPanel {
     /// and is compensated for in the baseline maths below.
     static let padding = CGSize(width: 0, height: 1)
 
+    /// Measured in space-widths of the caret line's own font, so the gap looks
+    /// the same at 11pt and 24pt.
+    static let caretGapInSpaces: CGFloat = 1.5
+
     private func relayout() {
         guard let origin = anchorOrigin else { return }
         let textSize = view.naturalTextSize
