@@ -64,6 +64,22 @@ These are the things that will silently break the app if forgotten.
 7. **Swift 6 strict concurrency is on.** MLX types are not `Sendable`. Inference lives
    behind an actor. Some Carbon globals (e.g. `kAXTrustedCheckOptionPrompt`) are
    imported as `var` and must be replaced with string literals.
+8. **A caret rect has zero width.** Never reject a caret bounds rect for having no
+   width — TextEdit, Brave and Notes all report 0, Safari reports 2. Doing so
+   rejects every app that works and silently drops the whole AX-first path onto the
+   element-frame fallback. Validate on height and a finite on-screen origin instead.
+   Note also that `CGRect.intersects` returns false for *any* empty rect, so an
+   on-screen test against a zero-width caret needs a widened probe copy.
+9. **Where you post an event decides who sees it.** Events posted to
+   `.cgAnnotatedSessionEventTap` enter the pipeline *after* a `.cgSessionEventTap`
+   listener, so our own tap never observes them. That is the right behaviour for
+   real accepts. Anything that needs to imitate a user — the self-test — must post
+   at `.cghidEventTap` instead.
+10. **Prefer the character the system already resolved.** Read the event's unicode
+    payload before re-deriving from the keycode. Dead keys, IME composition, non-US
+    layouts and text-expander injections all produce events whose keycode means
+    nothing. Control characters are the exception and stay with the decoder, so Tab,
+    Escape, Return and Backspace remain classified as keys.
 
 ## Targets
 
@@ -84,3 +100,10 @@ without ever touching AX.
 Live runs are expensive. Prefer logs over screenshots, unit tests over live runs, and
 one consolidated checkpoint per phase rather than verification after every fix. Budget
 for v1 is five live runs plus one batched six-app AX probe.
+
+The app can test itself. Ghost Text holds the Accessibility grant and a shell does
+not, so `--selftest` is the only place an automated end-to-end check can live: it
+types into TextEdit through the real tap and logs the buffer, the caret source, the
+panel frame and the accept result. It re-verifies that TextEdit is frontmost before
+*every* synthesized key — checking once and then typing blind put ten characters into
+a browser on the first run.
