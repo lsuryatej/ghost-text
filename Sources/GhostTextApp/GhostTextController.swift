@@ -1,5 +1,6 @@
 import AppKit
 import GhostTextCore
+import GhostTextInference
 import GhostTextUI
 import os
 
@@ -12,7 +13,10 @@ import os
 final class GhostTextController {
     /// Swap in the MLX engine here once inference lands. Returning nil means "no
     /// suggestion", which the caller treats the same as a dismissal.
-    var completionProvider: (@Sendable (String) async -> String?)?
+    /// Set once the model is warm. Held directly rather than behind a closure so
+    /// the streaming callback can be driven without extra hops.
+    var engine: CompletionEngine?
+    private var generation = 0
 
     private let tap = EventTapController()
     private let caretTracker = CaretTracker()
@@ -27,7 +31,7 @@ final class GhostTextController {
     /// The debounce, not inference, was the dominant term in perceived latency:
     /// 250ms of waiting in front of a 75ms completion. Inference at ~20ms prefill
     /// is cheap enough that firing eagerly and cancelling is the better trade.
-    private var scheduler = SuggestionScheduler(quietPeriod: 0.09)
+    private var scheduler = SuggestionScheduler(quietPeriod: 0.045)
     private var lastKnownGood: LastKnownGood?
     private var currentCompletion: String?
     private var pendingFire: DispatchWorkItem?
@@ -181,25 +185,52 @@ final class GhostTextController {
         suggestionRequestedAt = lastKeystroke
 
         inFlight?.cancel()
-        inFlight = Task { [weak self, sanitizer] in
-            guard let provider = await self?.completionProvider else {
-                // Placeholder still goes through the sanitizer, so the no-model
-                // path behaves exactly like the real one.
-                guard let cleaned = sanitizer.sanitize(raw: Self.placeholderCompletion, buffer: text) else { return }
-                await self?.present(completion: cleaned)
-                return
-            }
-            let started = ProcessInfo.processInfo.systemUptime
-            guard let raw = await provider(text) else { return }
-            guard !Task.isCancelled else { return }
+        generation &+= 1
+        let generation = self.generation
 
-            let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-            guard let cleaned = sanitizer.sanitize(raw: raw, buffer: text) else {
-                FileLog.app("completion rejected by sanitizer (\(Int(elapsed))ms) raw=\(raw.debugDescription)")
-                return
+        guard let engine else {
+            // No model: the placeholder still goes through the sanitizer so the
+            // no-model path behaves exactly like the real one.
+            if let cleaned = sanitizer.sanitize(raw: Self.placeholderCompletion, buffer: text) {
+                paint(cleaned, generation: generation)
             }
-            FileLog.app("completion \(Int(elapsed))ms -> \(cleaned.debugDescription)")
-            await self?.present(completion: cleaned)
+            return
+        }
+
+        inFlight = Task { [weak self, sanitizer] in
+            let started = ProcessInfo.processInfo.systemUptime
+
+            // Paint on the first token instead of waiting for the whole
+            // completion. Decode dominates end-to-end time, so this is most of
+            // the perceived latency win - the ghost text appears after roughly
+            // one decode step rather than ten.
+            let final = try? await engine.completeStreaming(buffer: text, maxTokens: 10) { partial in
+                guard let cleaned = sanitizer.sanitize(raw: partial, buffer: text) else { return }
+                Task { @MainActor in
+                    self?.paint(cleaned, generation: generation)
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            if let final, sanitizer.sanitize(raw: final, buffer: text) != nil {
+                FileLog.app("completion \(Int(elapsed))ms -> \(final.debugDescription)")
+            } else {
+                FileLog.app("completion rejected by sanitizer (\(Int(elapsed))ms) raw=\(final?.debugDescription ?? "nil")")
+            }
+        }
+    }
+
+    /// Streamed tokens arrive off the main actor and are hopped here one Task at
+    /// a time, so they can in principle land out of order. The generation counter
+    /// drops anything belonging to a superseded request.
+    private func paint(_ completion: String, generation: Int) {
+        guard generation == self.generation else { return }
+        if !panel.isPresented {
+            present(completion: completion)
+        } else {
+            currentCompletion = completion
+            panel.update(text: completion)
         }
     }
 
