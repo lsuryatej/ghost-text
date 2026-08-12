@@ -199,4 +199,42 @@ final class CompletionSanitizerTests: XCTestCase {
     func testPhraseWithMaxWordsOne() {
         XCTAssertEqual(CompletionSanitizer.phrase(of: "one two three", maxWords: 1), "one")
     }
+
+    // MARK: - Echo drop only fires on word boundaries
+
+    /// The regression this rule exists for: a coincidental one-character overlap
+    /// between the end of the buffer and the start of the completion must not
+    /// eat a character. "e" + "elephant" previously produced "lephant".
+    func testCoincidentalTrailingCharacterIsNotTreatedAsEcho() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "elephant in the room", buffer: "I saw the"), "elephant in the room")
+    }
+
+    func testMidWordCoincidenceIsNotTreatedAsEcho() {
+        let sanitizer = CompletionSanitizer()
+        // "st" ends "breakfast" but is not a word start, so "stopped" survives whole.
+        XCTAssertEqual(sanitizer.sanitize(raw: "stopped by", buffer: "we had breakfast"), "stopped by")
+    }
+
+    func testWholeRepeatedWordIsStillDropped() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "brown fox jumps", buffer: "The quick brown"), " fox jumps")
+    }
+
+    func testRepeatedPartialWordIsStillDropped() {
+        let sanitizer = CompletionSanitizer()
+        // Mid-word completion: no space is introduced.
+        XCTAssertEqual(sanitizer.sanitize(raw: "brown fox jumps", buffer: "The quick brow"), "n fox jumps")
+    }
+
+    func testSingleLetterWordEchoIsDropped() {
+        let sanitizer = CompletionSanitizer()
+        // "a" is a real word here and does start at a boundary, so it is an echo.
+        XCTAssertEqual(sanitizer.sanitize(raw: "a great day", buffer: "This is a"), " great day")
+    }
+
+    func testMultiWordEchoDropsTheLongestBoundaryMatch() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "quick brown fox", buffer: "The quick brown"), " fox")
+    }
 }

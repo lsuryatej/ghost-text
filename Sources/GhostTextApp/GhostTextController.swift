@@ -1,166 +1,293 @@
 import AppKit
+import GhostTextCore
 import GhostTextUI
 import os
 
-/// Ties the tap, the caret geometry, and the overlay together.
+/// Ties the tap, the buffer, the caret geometry and the overlay together.
 ///
-/// Scaffolding note: the buffer, key decoding, debounce and accept policy are all
-/// stubbed inline here for now, and get replaced by the tested `GhostTextCore`
-/// implementations once that lands. The completion text is canned — this exists to
-/// prove the tap, the AX geometry and the panel work together before a model is in
-/// the picture.
+/// Every decision of substance lives in `GhostTextCore` and is unit-tested there.
+/// This type is the wiring: it converts system events into `BufferEvent`s, moves
+/// work between the tap thread and the main actor, and drives the panel.
 @MainActor
 final class GhostTextController {
+    /// Swap in the MLX engine here once inference lands. Returning nil means "no
+    /// suggestion", which the caller treats the same as a dismissal.
+    var completionProvider: (@Sendable (String) async -> String?)?
+
     private let tap = EventTapController()
-    private let caret = CaretTracker()
+    private let caretTracker = CaretTracker()
     private let panel = GhostOverlayPanel()
 
-    /// Read from the tap thread, written from main. The tap's decision has to be
-    /// synchronous and cheap, so it reads this snapshot rather than asking the UI.
-    private let suggestionVisible = OSAllocatedUnfairLock(initialState: false)
+    private let decoder = KeyDecoder(layout: SystemKeyboardLayout())
+    private let acceptPolicy = AcceptPolicy()
+    private let sanitizer = CompletionSanitizer()
+    private let resolver = CaretResolver()
 
-    private var pendingSuggestion: DispatchWorkItem?
-    private var quietPeriod: TimeInterval = 0.25
+    private var buffer = KeystrokeBuffer()
+    private var scheduler = SuggestionScheduler()
+    private var lastKnownGood: LastKnownGood?
+    private var currentCompletion: String?
+    private var pendingFire: DispatchWorkItem?
+    private var inFlight: Task<Void, Never>?
+    private var lastKeystroke: TimeInterval = 0
+
+    /// Read from the tap thread on every keydown, written from the main actor.
+    /// The tap has to decide synchronously, so it reads this snapshot instead of
+    /// asking the UI anything.
+    private struct Snapshot: Sendable {
+        var suggestionVisible = false
+        var bundleID: String?
+    }
+    private let snapshot = OSAllocatedUnfairLock(initialState: Snapshot())
+
+    private static let idleTimeout: TimeInterval = 30
 
     private(set) var isEnabled = false
 
-    // Virtual key codes. Replaced by GhostTextCore.KeyDecoder once merged.
-    private enum Key {
-        static let tab: UInt16 = 48
-        static let escape: UInt16 = 53
-        static let grave: UInt16 = 50  // `~` is shift+grave
-        static let returnKey: UInt16 = 36
+    init() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated {
+                GhostTextControllerHolder.shared?.focusChanged(to: app?.bundleIdentifier)
+            }
+        }
     }
+
+    // MARK: - Enable / disable
 
     func setEnabled(_ enabled: Bool) {
         guard enabled != isEnabled else { return }
-        isEnabled = enabled
 
         if enabled {
-            tap.setDecider { [suggestionVisible] keyCode, flags in
-                // The rule that makes Tab safe: only ever swallow a key while a
-                // suggestion is actually on screen. With nothing showing, Tab and
-                // `~` reach the app untouched and behave exactly as normal.
-                guard suggestionVisible.withLock({ $0 }) else { return .pass }
-
-                switch keyCode {
-                case Key.tab, Key.escape:
-                    return .swallow
-                case Key.grave where flags.contains(.maskShift):
-                    return .swallow
-                default:
-                    return .pass
-                }
+            tap.setDecider { [decoder, acceptPolicy, snapshot] keyCode, flags in
+                let current = snapshot.withLock { $0 }
+                let key = decoder.decode(keyCode: keyCode, modifiers: ModifierSet(flags))
+                let decision = acceptPolicy.decide(
+                    key: key,
+                    suggestionVisible: current.suggestionVisible,
+                    bundleID: current.bundleID
+                )
+                return decision == .passThrough ? .pass : .swallow
             }
 
             tap.setObserver { [weak self] keyCode, flags, swallowed in
                 self?.handle(keyCode: keyCode, flags: flags, swallowed: swallowed)
             }
 
-            if tap.start() {
-                FileLog.app("enabled")
-            } else {
-                isEnabled = false
+            guard tap.start() else {
                 FileLog.app("enable FAILED — could not create event tap")
+                return
             }
+            isEnabled = true
+            snapshot.withLock { $0.bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+            FileLog.app("enabled")
         } else {
-            // Toggling off is a privacy guarantee, not a UI state: the tap is torn
+            isEnabled = false
+            // Toggling off is a privacy guarantee, not a UI state. The tap is torn
             // down so keystrokes stop being observed at all.
             tap.stop()
-            dismissSuggestion()
+            dismiss()
+            buffer = KeystrokeBuffer()
             FileLog.app("disabled — tap torn down")
         }
+    }
+
+    func focusChanged(to bundleID: String?) {
+        snapshot.withLock { $0.bundleID = bundleID }
+        guard isEnabled else { return }
+        apply(buffer.apply(.focusChanged(bundleID: bundleID)))
     }
 
     // MARK: - Key handling
 
     private func handle(keyCode: UInt16, flags: CGEventFlags, swallowed: Bool) {
+        let key = decoder.decode(keyCode: keyCode, modifiers: ModifierSet(flags))
+        let now = ProcessInfo.processInfo.systemUptime
+
+        // A swallowed key can only mean one of the three accept actions — the
+        // policy never swallows anything else.
         if swallowed {
-            switch keyCode {
-            case Key.tab:
-                accept(scope: .word)
-            case Key.grave:
-                accept(scope: .phrase)
-            case Key.escape:
-                dismissSuggestion()
-            default:
-                break
+            switch key {
+            case .tab: accept(scope: .word)
+            case .text("~"): accept(scope: .phrase)
+            case .escape: dismiss()
+            default: break
             }
             return
         }
 
-        // Any committing or caret-moving key invalidates what we think was typed.
-        if keyCode == Key.returnKey || keyCode == Key.escape {
-            dismissSuggestion()
+        if now - lastKeystroke > Self.idleTimeout, lastKeystroke > 0 {
+            apply(buffer.apply(.idleTimeout))
+        }
+        lastKeystroke = now
+
+        let event: BufferEvent?
+        switch key {
+        case .text(let character): event = .character(character)
+        case .backspace: event = .backspace
+        case .commit: event = .commit
+        case .escape: event = .dismiss
+        case .caretMove: event = .caretMoved
+        // An unswallowed Tab moved focus or inserted an indent either way, so
+        // whatever we thought was in the field is no longer trustworthy.
+        case .tab: event = .caretMoved
+        case .ignored: event = nil
+        }
+
+        guard let event else { return }
+        apply(buffer.apply(event), at: now)
+    }
+
+    private func apply(_ change: BufferChange, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        if change.shouldDismissSuggestion { dismiss() }
+
+        guard change.shouldRequestSuggestion else { return }
+        for command in scheduler.typingOccurred(at: now) {
+            switch command {
+            case .cancelInFlight, .cancelAll:
+                cancelPending()
+            case .scheduleFire(let at):
+                schedule(at: at, delay: at - now)
+            }
+        }
+    }
+
+    // MARK: - Suggestion lifecycle
+
+    private func schedule(at fireTime: TimeInterval, delay: TimeInterval) {
+        pendingFire?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.fire(scheduledFor: fireTime) }
+        }
+        pendingFire = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
+    }
+
+    private func fire(scheduledFor: TimeInterval) {
+        guard scheduler.fireDue(at: scheduledFor) else { return }
+
+        let text = buffer.text
+        guard !text.isEmpty else { return }
+
+        inFlight?.cancel()
+        inFlight = Task { [weak self, sanitizer] in
+            guard let provider = await self?.completionProvider else {
+                await self?.present(completion: Self.placeholderCompletion)
+                return
+            }
+            let started = ProcessInfo.processInfo.systemUptime
+            guard let raw = await provider(text) else { return }
+            guard !Task.isCancelled else { return }
+
+            let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            guard let cleaned = sanitizer.sanitize(raw: raw, buffer: text) else {
+                FileLog.app("completion rejected by sanitizer (\(Int(elapsed))ms) raw=\(raw.debugDescription)")
+                return
+            }
+            FileLog.app("completion \(Int(elapsed))ms -> \(cleaned.debugDescription)")
+            await self?.present(completion: cleaned)
+        }
+    }
+
+    private func present(completion: String) {
+        let candidates = caretTracker.sample()
+        let height = ScreenGeometry.primaryScreenHeight
+
+        // The resolver is pure and screen-height agnostic, so AX's top-left rects
+        // are flipped into AppKit space before they reach it.
+        let placement = resolver.resolve(
+            axRangeBounds: candidates.axRangeBounds.map { AXCoordinates.flipToAppKit(rect: $0, primaryScreenHeight: height) },
+            focusedElementFrame: candidates.focusedElementFrame.map { AXCoordinates.flipToAppKit(rect: $0, primaryScreenHeight: height) },
+            focusedWindowFrame: candidates.focusedWindowFrame.map { AXCoordinates.flipToAppKit(rect: $0, primaryScreenHeight: height) },
+            lastKnownGood: lastKnownGood,
+            currentBundleID: candidates.bundleID,
+            now: ProcessInfo.processInfo.systemUptime,
+            screens: ScreenGeometry.screenFrames
+        )
+
+        guard let placement else {
+            FileLog.app("no usable caret for \(candidates.bundleID ?? "?") — hiding")
+            dismiss()
             return
         }
 
-        scheduleSuggestion()
+        currentCompletion = completion
+        panel.present(
+            text: completion,
+            at: placement.origin,
+            lineHeight: placement.lineHeight,
+            fontSize: candidates.fontSize ?? 13
+        )
+        snapshot.withLock { $0.suggestionVisible = true }
+
+        if placement.source != .lastKnownGood {
+            lastKnownGood = LastKnownGood(
+                placement: placement,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                bundleID: candidates.bundleID
+            )
+        }
+
+        FileLog.app("""
+            present app=\(candidates.bundleID ?? "?") source=\(placement.source) \
+            origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) panel=\(panel.panelFrame)
+            """)
     }
 
     private enum AcceptScope { case word, phrase }
 
     private func accept(scope: AcceptScope) {
-        let completion = Self.cannedCompletion
+        guard let completion = currentCompletion else { return }
         let text = scope == .word
-            ? String(completion.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
-            : completion
+            ? CompletionSanitizer.firstWord(of: completion)
+            : CompletionSanitizer.phrase(of: completion, maxWords: 3)
 
+        guard !text.isEmpty else { return }
         FileLog.app("accept \(scope) -> \(text.debugDescription)")
-        dismissSuggestion()
+
+        dismiss()
+        // Keep our buffer in step with the field: this text is now typed.
+        _ = buffer.apply(.acceptedCompletion(text))
         KeystrokeSynthesizer.type(text)
     }
 
-    // MARK: - Suggestion lifecycle
-
-    private func scheduleSuggestion() {
-        pendingSuggestion?.cancel()
-
-        let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.presentSuggestion() }
-        }
-        pendingSuggestion = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + quietPeriod, execute: work)
-    }
-
-    private func presentSuggestion() {
-        let candidates = caret.sample()
-
-        guard let axRect = candidates.axRangeBounds else {
-            FileLog.app("caret UNAVAILABLE for \(candidates.bundleID ?? "?") — hiding overlay")
-            dismissSuggestion()
-            return
-        }
-
-        // AX reports top-left origin; AppKit wants bottom-left.
-        let flippedY = ScreenGeometry.primaryScreenHeight - axRect.maxY
-        let origin = CGPoint(x: axRect.maxX, y: flippedY)
-        let lineHeight = candidates.lineHeight ?? 16
-        let fontSize = candidates.fontSize ?? 13
-
-        panel.present(
-            text: Self.cannedCompletion,
-            at: origin,
-            lineHeight: lineHeight,
-            fontSize: fontSize
-        )
-        suggestionVisible.withLock { $0 = true }
-
-        FileLog.app("""
-            suggest app=\(candidates.bundleID ?? "?") \
-            axRect=(\(Int(axRect.minX)),\(Int(axRect.minY)) \(Int(axRect.width))x\(Int(axRect.height))) \
-            origin=(\(Int(origin.x)),\(Int(origin.y))) fontSize=\(Int(fontSize)) \
-            panel=\(panel.panelFrame)
-            """)
-    }
-
-    private func dismissSuggestion() {
-        pendingSuggestion?.cancel()
-        pendingSuggestion = nil
+    private func dismiss() {
+        cancelPending()
         panel.dismiss()
-        suggestionVisible.withLock { $0 = false }
+        currentCompletion = nil
+        snapshot.withLock { $0.suggestionVisible = false }
+        _ = scheduler.suggestionDismissed()
     }
 
-    /// Placeholder until the MLX engine lands.
-    private static let cannedCompletion = " brown fox jumps"
+    private func cancelPending() {
+        pendingFire?.cancel()
+        pendingFire = nil
+        inFlight?.cancel()
+        inFlight = nil
+    }
+
+    private static let placeholderCompletion = " brown fox jumps"
+}
+
+/// Notification closures need a reference that does not capture `self` during init.
+@MainActor
+enum GhostTextControllerHolder {
+    static var shared: GhostTextController?
+}
+
+private extension ModifierSet {
+    init(_ flags: CGEventFlags) {
+        var set = ModifierSet()
+        if flags.contains(.maskShift) { set.insert(.shift) }
+        if flags.contains(.maskControl) { set.insert(.control) }
+        if flags.contains(.maskAlternate) { set.insert(.option) }
+        if flags.contains(.maskCommand) { set.insert(.command) }
+        if flags.contains(.maskAlphaShift) { set.insert(.capsLock) }
+        if flags.contains(.maskSecondaryFn) { set.insert(.fn) }
+        self = set
+    }
 }
