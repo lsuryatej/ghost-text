@@ -59,6 +59,32 @@ enum SelfTest {
         try? await Task.sleep(for: .milliseconds(300))
         FileLog.app("selftest state after Escape: \(controller.debugState())")
 
+        // 5. The tilde path, which Tab does not exercise. Posted as a unicode
+        //    character rather than shift+grave, so it also confirms the tap reads
+        //    the system-resolved character rather than re-deriving from a keycode.
+        FileLog.app("selftest typing again, then `~` (expect swallow + accept phrase)")
+        for character in "jumps over " {
+            guard stillOnTarget("mid-typing 2") else { return }
+            KeystrokeSynthesizer.type(String(character), marked: false, at: .cghidEventTap)
+            try? await Task.sleep(for: .milliseconds(70))
+        }
+        try? await Task.sleep(for: .milliseconds(900))
+        FileLog.app("selftest state before tilde: \(controller.debugState())")
+
+        guard stillOnTarget("before tilde") else { return }
+        KeystrokeSynthesizer.type("~", marked: false, at: .cghidEventTap)
+        try? await Task.sleep(for: .milliseconds(600))
+        FileLog.app("selftest state after tilde: \(controller.debugState())")
+
+        // 6. With nothing showing, `~` must reach the app as a literal character.
+        //    This is the guarantee that makes intercepting it acceptable at all.
+        guard stillOnTarget("literal tilde") else { return }
+        KeystrokeSynthesizer.pressKey(53, marked: false, at: .cghidEventTap)
+        try? await Task.sleep(for: .milliseconds(300))
+        KeystrokeSynthesizer.type("~", marked: false, at: .cghidEventTap)
+        try? await Task.sleep(for: .milliseconds(400))
+        FileLog.app("selftest state after literal tilde: \(controller.debugState())")
+
         FileLog.app("selftest complete — check TextEdit for the resulting text")
     }
 
@@ -77,17 +103,28 @@ enum SelfTest {
         return true
     }
 
+    /// A scratch file of our own, so the test never touches the user's documents.
+    private static var scratchFile: URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/GhostText", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("selftest.txt")
+    }
+
     private static func focusTarget() async -> Bool {
-        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleID).first {
-            running.activate()
-        } else {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: targetBundleID) else {
-                return false
-            }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        // Activating TextEdit is not enough. With no document open it has no window
+        // to focus, so it hands focus straight back to the previous app and the
+        // keystrokes go nowhere - or worse, somewhere else. Opening a real file
+        // guarantees a text area to type into.
+        let file = scratchFile
+        try? "".write(to: file, atomically: true, encoding: .utf8)
+
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: targetBundleID) else {
+            return false
         }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        _ = try? await NSWorkspace.shared.open([file], withApplicationAt: appURL, configuration: configuration)
 
         // Verify rather than assume. Posting keystrokes at the wrong app is the
         // one genuinely damaging failure mode here.
