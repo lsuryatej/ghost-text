@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         GhostTextControllerHolder.shared = controller
         AXProbeHolder.shared = probe
         controller.setEnabled(true)
+
+        if CommandLine.arguments.contains("--selftest") {
+            SelfTest.run(controller: controller)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

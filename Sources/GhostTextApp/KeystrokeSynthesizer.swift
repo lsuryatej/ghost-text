@@ -12,7 +12,9 @@ enum KeystrokeSynthesizer {
     /// apps. Chunking keeps each event small enough to be reliable.
     private static let chunkSize = 16
 
-    static func type(_ text: String) {
+    /// `marked` stamps the events so our own tap ignores them. The self-test posts
+    /// unmarked events on purpose, to imitate a real person typing.
+    static func type(_ text: String, marked: Bool = true, at location: CGEventTapLocation = .cgAnnotatedSessionEventTap) {
         guard !text.isEmpty else { return }
         guard let source = CGEventSource(stateID: .privateState) else {
             FileLog.app("synthesize FAILED: could not create event source")
@@ -23,12 +25,28 @@ enum KeystrokeSynthesizer {
         var index = 0
         while index < units.count {
             let end = min(index + chunkSize, units.count)
-            post(Array(units[index..<end]), source: source)
+            post(Array(units[index..<end]), source: source, marked: marked, at: location)
             index = end
         }
     }
 
-    private static func post(_ chunk: [UniChar], source: CGEventSource) {
+    /// For keys that carry no text — Tab, Escape, Return.
+    static func pressKey(_ virtualKey: CGKeyCode, marked: Bool = true, at location: CGEventTapLocation = .cgAnnotatedSessionEventTap) {
+        guard let source = CGEventSource(stateID: .privateState) else { return }
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else { return }
+
+        down.flags = []
+        up.flags = []
+        if marked {
+            down.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
+            up.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
+        }
+        down.post(tap: location)
+        up.post(tap: location)
+    }
+
+    private static func post(_ chunk: [UniChar], source: CGEventSource, marked: Bool, at location: CGEventTapLocation) {
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
 
@@ -42,10 +60,12 @@ enum KeystrokeSynthesizer {
         up.flags = []
 
         // Let our own tap recognise these and skip re-buffering them.
-        down.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
-        up.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
+        if marked {
+            down.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
+            up.setIntegerValueField(.eventSourceUserData, value: EventTapController.syntheticMarker)
+        }
 
-        down.post(tap: .cgAnnotatedSessionEventTap)
-        up.post(tap: .cgAnnotatedSessionEventTap)
+        down.post(tap: location)
+        up.post(tap: location)
     }
 }
