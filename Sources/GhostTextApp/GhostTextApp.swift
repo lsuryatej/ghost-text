@@ -69,9 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let elapsed = ProcessInfo.processInfo.systemUptime - started
             FileLog.app(String(format: "model warm in %.1fs", elapsed))
 
-            controller.completionProvider = { buffer in
-                try? await engine.complete(buffer: buffer, maxTokens: 12)
-            }
+            controller.engine = engine
             self.modelReady = true
             controller.setEnabled(true)
         }

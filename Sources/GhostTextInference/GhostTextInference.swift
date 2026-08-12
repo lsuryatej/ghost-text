@@ -59,6 +59,75 @@ public enum PromptFraming: Sendable, Equatable {
     }
 }
 
+// MARK: - Completion boundary
+
+/// Decides whether a completion has reached a useful stopping point, so
+/// generation can stop before `maxTokens` instead of always running to the
+/// cap. This is next-word/phrase completion (Tab takes one word, `~` takes a
+/// short phrase) — most useful completions end well short of the token
+/// budget, and stopping early is most of the latency win: decode dominates
+/// end-to-end time (see BENCH.md), so fewer tokens decoded is fewer
+/// milliseconds on screen.
+///
+/// A pure function over the generated text alone (never touches MLX, the
+/// engine, or wall-clock time) so it is trivially unit-testable in isolation.
+public enum CompletionBoundary {
+    /// Default "roughly 8 words" cap referenced in DESIGN.md-adjacent bench
+    /// notes: `~` accepts a 2-3 word phrase and Tab accepts one word, so 8
+    /// words is already generous headroom above anything the UI shows in one
+    /// accept, while still bounding runaway completions that never hit a
+    /// terminator or newline.
+    public static let defaultWordLimit = 8
+
+    private static let terminators: Set<Character> = [".", "!", "?"]
+
+    /// `text` is the completion generated *so far* — never the original
+    /// buffer, which is not re-examined. Checked after every streamed token
+    /// (see `CompletionEngine`'s internal generation loop), so this needs to
+    /// be cheap: no regex, single pass over `text` at worst.
+    ///
+    /// Three triggers:
+    /// 1. A sentence terminator (`.`, `!`, `?`) that is either the last
+    ///    character produced so far, or immediately followed by whitespace.
+    ///    Checking "last character so far" (not waiting to confirm a
+    ///    trailing space arrives) trades a small amount of false-stop risk
+    ///    on things like mid-typing decimals (`3.14`) for not paying for an
+    ///    extra decode step just to confirm — acceptable here because a
+    ///    next-word completion stopping one token early is a non-event, and
+    ///    the model rarely emits a bare `.` mid-number as its own token
+    ///    against these prompts (verified empirically in `--quality` runs).
+    /// 2. Any newline. Completions are single-line by design; the model
+    ///    occasionally free-associates into a fresh paragraph, a bullet
+    ///    list, or a recipe ingredients block (see BENCH.md's quality
+    ///    table), none of which are useful as inline ghost text.
+    /// 3. `wordLimit` whitespace-separated words have been produced.
+    public static func isAtBoundary(_ text: String, wordLimit: Int = defaultWordLimit) -> Bool {
+        guard !text.isEmpty else { return false }
+
+        if text.contains(where: { $0.isNewline }) {
+            return true
+        }
+
+        var previous: Character?
+        for character in text {
+            if let previous, terminators.contains(previous), character.isWhitespace {
+                return true
+            }
+            previous = character
+        }
+        if let last = text.last, terminators.contains(last) {
+            return true
+        }
+
+        let wordCount = text.split(whereSeparator: { $0.isWhitespace }).count
+        if wordCount >= wordLimit {
+            return true
+        }
+
+        return false
+    }
+}
+
 // MARK: - CompletionEngine
 
 /// Owns the MLX model, tokenizer, and generation loop for on-device next-phrase
@@ -69,6 +138,13 @@ public actor CompletionEngine {
     private let modelID: String
     private let framing: PromptFraming
     private var container: ModelContainer?
+
+    /// Lowered from the original 12 after `ghost-bench` data (see BENCH.md's
+    /// "Retuning maxTokens" section) showed boundary-stop ends most
+    /// completions well before this cap fires — it only exists now as a
+    /// worst-case backstop for buffers with no natural terminator nearby, so
+    /// it can be small.
+    public static let defaultMaxTokens = 10
 
     /// - Parameters:
     ///   - modelID: a HuggingFace repo id, e.g. `"mlx-community/Qwen2.5-0.5B-4bit"`.
@@ -109,31 +185,93 @@ public actor CompletionEngine {
 
         // Throwaway generation: compiles every Metal kernel the real request
         // path will hit, so the user's first completion isn't the one that
-        // eats the JIT cost.
-        _ = try await complete(buffer: "The quick brown fox jumps over the lazy", maxTokens: 4)
+        // eats the JIT cost. Streamed (not plain `complete`) so warmup also
+        // compiles whatever kernel path first-token delivery depends on —
+        // there shouldn't be one that differs from `complete`'s, but this
+        // keeps the two paths symmetric for free.
+        _ = try await completeStreaming(
+            buffer: "The quick brown fox jumps over the lazy", maxTokens: 4, onPartial: { _ in })
     }
 
     /// Generate a short continuation of `buffer`. Cancellable: if the calling
     /// `Task` is cancelled, generation stops within one decode step instead
     /// of running to `maxTokens`. Emits raw model output — no trimming, no
     /// dedup against `buffer`, no whitespace cleanup. That's
-    /// `GhostTextCore.CompletionSanitizer`'s job.
-    public func complete(buffer: String, maxTokens: Int = 12) async throws -> String {
+    /// `GhostTextCore.CompletionSanitizer`'s job. Stops early at a
+    /// `CompletionBoundary` (sentence end, newline, or ~8 words) rather than
+    /// always running to `maxTokens`.
+    public func complete(buffer: String, maxTokens: Int = defaultMaxTokens) async throws -> String {
         try await completeWithTiming(buffer: buffer, maxTokens: maxTokens).text
     }
 
     /// Like `complete`, but also returns the engine's own timing breakdown
-    /// (prefill vs decode) for the call. Used by `ghost-bench`; not part of
-    /// the app's hot path, which only needs the text.
+    /// (prefill vs decode, first-token latency, and whether the boundary or
+    /// `maxTokens` ended generation). Used by `ghost-bench`; not part of the
+    /// app's hot path, which only needs the text.
     public func completeWithTiming(
-        buffer: String, maxTokens: Int = 12
-    ) async throws -> (text: String, promptTime: TimeInterval, generateTime: TimeInterval, promptTokenCount: Int, generationTokenCount: Int) {
+        buffer: String, maxTokens: Int = defaultMaxTokens
+    ) async throws -> CompletionTiming {
+        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: nil)
+    }
+
+    /// Streaming completion: `onPartial` fires with the *cumulative* text so
+    /// far on every generated token, starting with the first one, so a
+    /// caller can paint ghost text as soon as it exists instead of waiting
+    /// for the whole completion. Returns the final full text once generation
+    /// stops (boundary, `maxTokens`, or cancellation).
+    ///
+    /// `AsyncThrowingStream` would be the other reasonable shape here, but a
+    /// callback keeps the actor-hop story simple: `onPartial` is invoked
+    /// synchronously from inside this actor's isolated `container.perform`
+    /// closure (the same context that drives the token loop), so there is no
+    /// extra stream-consumer `Task` and no risk of a second reader racing
+    /// `complete`'s cancellation path. The tradeoff a caller should know:
+    /// `onPartial` runs on whatever queue MLX's `container.perform` uses,
+    /// not necessarily the main actor — callers updating UI (as `GhostTextApp`
+    /// will) must hop to `MainActor` themselves inside the closure.
+    ///
+    /// Cancellable exactly like `complete`: cancelling the calling `Task`
+    /// stops generation within one decode step. `onPartial` is `@Sendable`
+    /// and non-async so it can be called inline without awaiting back into
+    /// the caller's isolation domain from inside the actor.
+    public func completeStreaming(
+        buffer: String,
+        maxTokens: Int = defaultMaxTokens,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: onPartial).text
+    }
+
+    /// Like `completeStreaming`, but also returns the timing breakdown.
+    /// `ghost-bench` uses this to measure first-token latency through the
+    /// real streaming API path rather than reconstructing it from
+    /// `completeWithTiming`'s internals.
+    public func completeStreamingWithTiming(
+        buffer: String,
+        maxTokens: Int = defaultMaxTokens,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> CompletionTiming {
+        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: onPartial)
+    }
+
+    /// Shared generation core for all four public entry points above.
+    /// `onPartial == nil` is the non-streaming path (no per-token callback
+    /// overhead beyond the boundary check, which runs either way since it's
+    /// cheap and always wanted).
+    private func runGeneration(
+        buffer: String,
+        maxTokens: Int,
+        onPartial: (@Sendable (String) -> Void)?
+    ) async throws -> CompletionTiming {
         guard let container else { throw CompletionEngineError.notReady }
         guard !buffer.isEmpty else {
-            return ("", 0, 0, 0, 0)
+            return CompletionTiming(
+                text: "", promptTime: 0, generateTime: 0, promptTokenCount: 0,
+                generationTokenCount: 0, firstTokenTime: nil, stoppedAtBoundary: false)
         }
 
         let promptText = framedPrompt(for: buffer)
+        let callStart = Date()
 
         return try await container.perform { context in
             let promptTokens = context.tokenizer.encode(text: promptText, addSpecialTokens: true)
@@ -165,6 +303,10 @@ public actor CompletionEngine {
 
             var result = ""
             var info: GenerateCompletionInfo?
+            var firstTokenTime: TimeInterval?
+            var stoppedAtBoundary = false
+            var boundaryCancelled = false
+
             for await event in stream {
                 if Task.isCancelled {
                     // Signal the detached generation task to unwind; it is
@@ -176,7 +318,26 @@ public actor CompletionEngine {
                 }
                 switch event {
                 case .chunk(let text):
+                    guard !boundaryCancelled else { break }
+                    if firstTokenTime == nil {
+                        firstTokenTime = Date().timeIntervalSince(callStart)
+                    }
                     result += text
+                    onPartial?(result)
+                    if CompletionBoundary.isAtBoundary(result) {
+                        // Stop the underlying generation task now rather than
+                        // waiting for maxTokens — this is the whole point of
+                        // boundary-stop. Keep draining the stream (don't
+                        // `break` this loop) so the `.info` event below still
+                        // arrives and timing stays populated: once
+                        // `task.cancel()` lands, `generateTask`'s loop
+                        // notices on its next iteration and finishes almost
+                        // immediately (no further GPU work), so this costs
+                        // no meaningful latency.
+                        stoppedAtBoundary = true
+                        boundaryCancelled = true
+                        task.cancel()
+                    }
                 case .info(let completionInfo):
                     info = completionInfo
                 case .toolCall:
@@ -188,12 +349,14 @@ public actor CompletionEngine {
             // command buffer / cache state cleanly) before returning.
             await task.value
 
-            return (
-                result,
-                info?.promptTime ?? 0,
-                info?.generateTime ?? 0,
-                promptTokens.count,
-                info?.generationTokenCount ?? 0
+            return CompletionTiming(
+                text: result,
+                promptTime: info?.promptTime ?? 0,
+                generateTime: info?.generateTime ?? 0,
+                promptTokenCount: promptTokens.count,
+                generationTokenCount: info?.generationTokenCount ?? 0,
+                firstTokenTime: firstTokenTime,
+                stoppedAtBoundary: stoppedAtBoundary
             )
         }
     }
@@ -215,4 +378,25 @@ public actor CompletionEngine {
                 """
         }
     }
+}
+
+/// Timing breakdown for one `complete`/`completeStreaming` call. Returned by
+/// the `*WithTiming` variants; `ghost-bench` is the primary consumer.
+public struct CompletionTiming: Sendable {
+    public let text: String
+    /// Engine-reported prefill time (prompt encode + first forward pass).
+    public let promptTime: TimeInterval
+    /// Engine-reported decode time (all sampled tokens, including any that
+    /// were in flight when a boundary-triggered cancel landed).
+    public let generateTime: TimeInterval
+    public let promptTokenCount: Int
+    public let generationTokenCount: Int
+    /// Wall-clock time from the call starting to the first token's text
+    /// arriving, or `nil` if no token was generated (e.g. empty buffer).
+    /// This is the number that determines when ghost text can first appear
+    /// on screen.
+    public let firstTokenTime: TimeInterval?
+    /// `true` if `CompletionBoundary.isAtBoundary` ended generation early;
+    /// `false` if it ran to `maxTokens` (or was cancelled by the caller).
+    public let stoppedAtBoundary: Bool
 }
