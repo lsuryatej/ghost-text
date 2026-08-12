@@ -25,6 +25,21 @@ final class GhostTextController {
     private let caretTracker = CaretTracker()
     private let contextProvider = ContextProvider()
     private let assembler = ContextAssembler()
+
+    /// Loaded once off the main actor: 236k words is ~2.5MB of parsing.
+    private var instant = InstantCompleter()
+
+    func loadDictionary() {
+        Task.detached(priority: .utility) {
+            guard let text = try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8) else { return }
+            let words = text.split(separator: "\n").map(String.init)
+            let completer = InstantCompleter(dictionary: words)
+            await MainActor.run {
+                GhostTextControllerHolder.shared?.instant = completer
+                FileLog.app("instant completer ready: \(words.count) words")
+            }
+        }
+    }
     private let panel = GhostOverlayPanel()
 
     private let decoder = KeyDecoder(layout: SystemKeyboardLayout())
@@ -47,6 +62,7 @@ final class GhostTextController {
     private var suggestionRequestedAt: TimeInterval = 0
     private var lastContextDescription = ""
     private var typedThrough = 0
+    private var instantShown = 0
 
     /// Read from the tap thread on every keydown, written from the main actor.
     /// The tap has to decide synchronously, so it reads this snapshot instead of
@@ -177,6 +193,13 @@ final class GhostTextController {
 
         guard let event else { return }
         apply(buffer.apply(event), at: now)
+
+        // Show a word completion straight away, before the model has answered.
+        // Costs nothing, and covers the ~25% of requests where the model returns
+        // only a newline or full stop and would otherwise show nothing at all.
+        // Must run after the buffer is updated, so the fragment includes the
+        // character just typed.
+        if case .text = key { offerInstantCompletion() }
     }
 
     private func apply(_ change: BufferChange, at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
@@ -270,6 +293,16 @@ final class GhostTextController {
         }
     }
 
+    /// A zero-cost guess while the model works. Never overwrites a live model
+    /// suggestion: the model's answer is better whenever it exists.
+    private func offerInstantCompletion() {
+        guard !panel.isPresented, currentCompletion == nil else { return }
+        let context = contextProvider.read().textBeforeCaret ?? buffer.text
+        guard let remainder = instant.complete(buffer: buffer.text, context: context) else { return }
+        instantShown += 1
+        present(completion: remainder, viaTypeThrough: true)
+    }
+
     /// Streamed tokens arrive off the main actor and are hopped here one Task at
     /// a time, so they can in principle land out of order. The generation counter
     /// drops anything belonging to a superseded request.
@@ -325,7 +358,7 @@ final class GhostTextController {
         let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
             \(viaTypeThrough ? "typethrough" : "present") app=\(candidates.bundleID ?? "?") source=\(placement.source) \
-            e2e=\(viaTypeThrough ? 0 : Int(endToEnd))ms tt=\(typedThrough) \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
+            e2e=\(viaTypeThrough ? 0 : Int(endToEnd))ms tt=\(typedThrough) inst=\(instantShown) \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
             line=\(Int(placement.lineHeight)) origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
             panel=\(panel.panelFrame)
             """)

@@ -100,6 +100,16 @@ public actor CompletionEngine {
         }
     }
     private let cacheBox = CacheBox()
+
+    /// The generation currently using the KV cache.
+    ///
+    /// `ModelContainer.perform` awaits inside its closure, and Swift actors are
+    /// re-entrant at await points, so a second request could enter while the
+    /// first was still streaming and both would mutate the same cache. That
+    /// corrupts the attention state: the model started emitting the same
+    /// hallucinated digits ("1039487") for completely unrelated prompts.
+    /// Generations are now strictly serialised over the shared cache.
+    private var activeGeneration: Task<CompletionTiming, Error>?
     private var instructions: String?
 
     /// Writer-supplied guidance folded into every prompt. Changing it does not
@@ -249,6 +259,24 @@ public actor CompletionEngine {
     /// overhead beyond the boundary check, which runs either way since it's
     /// cheap and always wanted).
     private func runGeneration(
+        buffer: String,
+        suffix: String?,
+        maxTokens: Int,
+        onPartial: (@Sendable (String) -> Void)?
+    ) async throws -> CompletionTiming {
+        // Take sole ownership of the cache before touching it. The previous
+        // generation is already stale by definition - the user typed again.
+        if let previous = activeGeneration {
+            previous.cancel()
+            _ = try? await previous.value
+        }
+        let task = Task { try await self.performGeneration(buffer: buffer, suffix: suffix, maxTokens: maxTokens, onPartial: onPartial) }
+        activeGeneration = task
+        defer { if activeGeneration == task { activeGeneration = nil } }
+        return try await task.value
+    }
+
+    private func performGeneration(
         buffer: String,
         suffix: String?,
         maxTokens: Int,

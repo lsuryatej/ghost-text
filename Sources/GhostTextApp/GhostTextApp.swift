@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Permissions.promptAll()
 
         GhostTextControllerHolder.shared = controller
+        controller.loadDictionary()
         AXProbeHolder.shared = probe
         loadModel()
 
