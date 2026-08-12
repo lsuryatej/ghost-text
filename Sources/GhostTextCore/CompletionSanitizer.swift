@@ -19,6 +19,7 @@ public struct CompletionSanitizer: Sendable {
     public func sanitize(raw: String, buffer: String) -> String? {
         var work = Self.truncateAtNewline(raw)
         work = Self.stripWrappingArtifacts(work)
+        work = Self.stripLeadingEllipsis(work)
         work = Self.dropEchoedContext(work, buffer: buffer)
         work = Self.normalizeWhitespace(work, bufferEndsInWhitespace: buffer.last?.isWhitespace ?? false)
         work = Self.truncateAtDegenerateRepetition(work)
@@ -26,6 +27,33 @@ public struct CompletionSanitizer: Sendable {
 
         guard Self.isMeaningful(work) else { return nil }
         return work
+    }
+
+    /// Removes a leading ellipsis.
+    ///
+    /// Larger instruct models have a tic of opening a continuation with "..." to
+    /// signal "carrying on from here" - Qwen2.5-1.5B did it on a third of the
+    /// quality prompts. As inline ghost text it is noise, and it pushes the real
+    /// words along by three characters.
+    static func stripLeadingEllipsis(_ s: String) -> String {
+        let hadSpaceBefore = s.first?.isWhitespace ?? false
+        var work = String(s.drop(while: { $0.isWhitespace }))
+
+        var changed = false
+        while work.hasPrefix("...") || work.hasPrefix("\u{2026}") {
+            work = work.hasPrefix("...") ? String(work.dropFirst(3)) : String(work.dropFirst())
+            changed = true
+        }
+        guard changed else { return s }
+
+        // Whitespace on either side of the ellipsis was the word separator. Drop
+        // it and "we could" + "organize" concatenates into "couldorganize"; the
+        // later whitespace pass removes it again if the buffer already ends in a
+        // space, so keeping it here is always safe.
+        let hadSpaceAfter = work.first?.isWhitespace ?? false
+        work = String(work.drop(while: { $0.isWhitespace }))
+        guard !work.isEmpty else { return "" }
+        return (hadSpaceBefore || hadSpaceAfter) ? " " + work : work
     }
 
     /// Cuts a completion short at the point it starts looping.

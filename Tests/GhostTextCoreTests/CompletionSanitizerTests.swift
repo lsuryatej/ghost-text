@@ -300,4 +300,29 @@ final class CompletionSanitizerTests: XCTestCase {
         let sanitizer = CompletionSanitizer()
         XCTAssertNil(sanitizer.sanitize(raw: "\n\n\n", buffer: "he wrote "))
     }
+
+    // MARK: - Leading ellipsis
+
+    func testStripsLeadingEllipsis() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "... organize a picnic", buffer: "maybe we could"),
+            " organize a picnic"
+        )
+    }
+
+    func testStripsUnicodeEllipsis() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "\u{2026}the view", buffer: "I like "), "the view")
+    }
+
+    func testEllipsisOnlyIsRejected() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertNil(sanitizer.sanitize(raw: "...", buffer: "we should "))
+    }
+
+    func testInternalEllipsisIsLeftAlone() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "a sense of... calm", buffer: "he felt "), "a sense of... calm")
+    }
 }

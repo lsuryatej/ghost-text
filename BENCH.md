@@ -28,34 +28,19 @@ re-prefilling the whole buffer on every pause. That's only true if a full re-pro
 ## Latency
 
 <!-- LATENCY:BEGIN -->
-### `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+### `mlx-community/Qwen2.5-1.5B-Instruct-4bit`
 
-Cold load (download-if-needed + weight load + first-token Metal kernel compile): **1.16s**
+Cold load (download-if-needed + weight load + first-token Metal kernel compile): **106.87s**
 
-20 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
-
-| Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
-|---|---|---|---|---|---|---|---|
-| 20 chars | 109ms | 113ms | 113ms | 17ms | 19ms | 90ms | 93ms |
-| 50 chars | 108ms | 108ms | 109ms | 17ms | 17ms | 89ms | 89ms |
-| 100 chars | 110ms | 114ms | 115ms | 18ms | 18ms | 91ms | 94ms |
-| 200 chars | 115ms | 124ms | 135ms | 18ms | 20ms | 94ms | 102ms |
-| 400 chars | 117ms | 118ms | 118ms | 19ms | 19ms | 96ms | 97ms |
-
-
-### `mlx-community/Qwen2.5-0.5B-4bit`
-
-Cold load (download-if-needed + weight load + first-token Metal kernel compile): **1.12s**
-
-20 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
+8 samples per buffer length, maxTokens=10. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
 
 | Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
 |---|---|---|---|---|---|---|---|
-| 20 chars | 122ms | 125ms | 129ms | 20ms | 22ms | 100ms | 103ms |
-| 50 chars | 122ms | 124ms | 126ms | 20ms | 20ms | 101ms | 102ms |
-| 100 chars | 123ms | 124ms | 129ms | 20ms | 21ms | 101ms | 102ms |
-| 200 chars | 124ms | 128ms | 132ms | 20ms | 21ms | 102ms | 107ms |
-| 400 chars | 126ms | 132ms | 133ms | 21ms | 22ms | 104ms | 109ms |
+| 20 chars | 82ms | 108ms | 108ms | 25ms | 26ms | 51ms | 77ms |
+| 50 chars | 92ms | 110ms | 110ms | 25ms | 27ms | 60ms | 78ms |
+| 100 chars | 58ms | 59ms | 59ms | 26ms | 27ms | 26ms | 27ms |
+| 200 chars | 46ms | 48ms | 48ms | 40ms | 41ms | 0ms | 0ms |
+| 400 chars | 124ms | 126ms | 126ms | 42ms | 43ms | 76ms | 77ms |
 
 
 <!-- LATENCY:END -->
@@ -221,54 +206,54 @@ maxTokens=12. Framing: `chatPrefill`.
 
 | Buffer | Completion |
 |---|---|
-| `I was thinking that maybe we could` | ` start with a new project idea that aligns with our interests` |
-| `The report shows a significant` | ` decrease in the number of cases of a new infectious disease,` |
-| `She opened the door and` | ` stepped inside, her heart racing with excitement. The warm sun` |
-| `He walked into the room and immediately` | ` felt a sense of calm wash over him. The room was` |
+| `I was thinking that maybe we could` | ` start with a new project idea for this` |
+| `The report shows a significant` | ` increase in customer satisfaction scores, indicating that the` |
+| `She opened the door and` | ` stepped inside to find a cozy room with` |
+| `He walked into the room and immediately` | ` felt a sense of calm wash over him` |
 | `According to the latest data, the company` | `'s revenue increased by 5% this quarter.` |
-| `The weather this weekend is supposed to be absolutely gorg` | `onous with high temperatures and unpredictable weather patterns.⏎⏎The sky` |
-| `Can you send me the quarterly rep` | `urchase notice?` |
-| `I really appreciate you taking the time to expl` | `aine the instructions.` |
-| `We should probably reconsi` | `errate our approach to this project.` |
-| `The recipe calls for two cups of all-purp` | `ulent ingredients.⏎⏎Ingredients:⏎- 2 cups of all-p` |
-| `Thanks so much for your help. ` | ` I'm here to assist you.` |
-| `Let me know what you think. ` | `` |
-| `That sounds like a great plan. ` | ` What's the next step?` |
-| `Once the meeting wraps up,` | ` the team will discuss the findings and recommendations for improvement.` |
-| `If the weather holds,` | ` we can enjoy a day of relaxation and reflection in the garden` |
-| `After a long day at the office,` | ` the employee felt refreshed and energized.` |
+| `The weather this weekend is supposed to be absolutely gorg` | `onzola, with a high chance of sunny spells` |
+| `Can you send me the quarterly rep` | `urchase summary?` |
+| `I really appreciate you taking the time to expl` | `aine me about this topic.⏎` |
+| `We should probably reconsi` | `errate our approach to this project.⏎⏎` |
+| `The recipe calls for two cups of all-purp` | `ulent ingredients.⏎⏎` |
+| `Thanks so much for your help. ` | ` I'm here to assist you with any question` |
+| `Let me know what you think. ` | ` What's your idea?` |
+| `That sounds like a great plan. ` | ` What's next?` |
+| `Once the meeting wraps up,` | ` Sarah reflects on her day and what she` |
+| `If the weather holds,` | ` we can enjoy a day of relaxation and` |
+| `After a long day at the office,` | ` she took a walk in the park to` |
 | `The stock market fell sharply after the announcement.` | `` |
-| `Once upon a time, in a village near the coast, there lived` | ` a young girl named Lily who loved to explore and learn about` |
-| `In conclusion, the evidence strongly suggests` | ` that the person's actions were not only illegal but also unethical` |
-| `My favorite thing about the new apartment is` | ` the fresh air and the feeling of freedom to explore the city` |
+| `Once upon a time, in a village near the coast, there lived` | ` a young girl named Lily who loved to` |
+| `In conclusion, the evidence strongly suggests` | ` that the person who committed the crime was` |
+| `My favorite thing about the new apartment is` | ` that it's much smaller than my old one` |
 
 
-### `mlx-community/Qwen2.5-0.5B-4bit`
+### `mlx-community/Qwen2.5-1.5B-Instruct-4bit`
 
-maxTokens=12. Framing: `raw`.
+maxTokens=12. Framing: `chatPrefill`.
 
 | Buffer | Completion |
 |---|---|
-| `I was thinking that maybe we could` | ` use the same approach as for the original question to solve this` |
-| `The report shows a significant` | ` increase in the number of people who have been diagnosed with the` |
-| `She opened the door and` | ` looked around for the first time. The sight was so ______` |
-| `He walked into the room and immediately` | ` felt the smell of the kitchen. The smell was strong and` |
-| `According to the latest data, the company` | `'s sales revenue in 2014 was 1` |
-| `The weather this weekend is supposed to be absolutely gorg` | `onians. The weather forecast says that the temperature will be` |
-| `Can you send me the quarterly rep` | `atriation report for the year 2021?⏎` |
-| `I really appreciate you taking the time to expl` | `aine the code. I have a problem where I have a` |
-| `We should probably reconsi` | `- ⏎der our approach to this problem. ⏎We should` |
-| `The recipe calls for two cups of all-purp` | `ura flour. If the recipe calls for 3 cups of` |
-| `Thanks so much for your help. ` | ` I will keep you updated.  Thanks again for your help` |
-| `Let me know what you think. ` | `2012-02-12T1` |
-| `That sounds like a great plan. ` | ` I will be sure to tell my wife and kids about it` |
-| `Once the meeting wraps up,` | ` the meeting chairperson should promptly report to the higher-level party` |
-| `If the weather holds,` | ` the game will be played on a 100-meter` |
-| `After a long day at the office,` | ` a group of friends decides to play a game of tag.` |
-| `The stock market fell sharply after the announcement.` | ` The market was down 2% on the day.⏎The` |
-| `Once upon a time, in a village near the coast, there lived` | ` a man named John. One day, John's wife,` |
-| `In conclusion, the evidence strongly suggests` | ` that the use of the Internet has had a significant impact on` |
-| `My favorite thing about the new apartment is` | ` the kitchen. It’s a nice size, but it’s` |
+| `I was thinking that maybe we could` | `... organize a picnic in the park. It` |
+| `The report shows a significant` | ` increase in global temperatures over past decades.` |
+| `She opened the door and` | ` stepped inside, feeling a mix of excitement and` |
+| `He walked into the room and immediately` | ` felt a sense of... tranquility.` |
+| `According to the latest data, the company` | `'s profits have increased by 20% over last` |
+| `The weather this weekend is supposed to be absolutely gorg` | `on...` |
+| `Can you send me the quarterly rep` | `ot? I` |
+| `I really appreciate you taking the time to expl` | `a...` |
+| `We should probably reconsi` | `...` |
+| `The recipe calls for two cups of all-purp` | `сe flour, one cup of sugar, and a` |
+| `Thanks so much for your help. ` | ` I really appreciate it.` |
+| `Let me know what you think. ` | ` Let's move on to the next item.` |
+| `That sounds like a great plan. ` | ` Let's get started right away!` |
+| `Once the meeting wraps up,` | ` John heads to his office for a quiet` |
+| `If the weather holds,` | ` we'll head to the beach tomorrow.` |
+| `After a long day at the office,` | ` I finally got home and collapsed on my` |
+| `The stock market fell sharply after the announcement.` | `` |
+| `Once upon a time, in a village near the coast, there lived` | ` an old man named Mr. Smith` |
+| `In conclusion, the evidence strongly suggests` | ` that...` |
+| `My favorite thing about the new apartment is` | ` the view.` |
 
 
 <!-- QUALITY:END -->
