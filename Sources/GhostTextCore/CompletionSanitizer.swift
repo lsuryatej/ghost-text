@@ -21,10 +21,45 @@ public struct CompletionSanitizer: Sendable {
         work = Self.stripWrappingArtifacts(work)
         work = Self.dropEchoedContext(work, buffer: buffer)
         work = Self.normalizeWhitespace(work, bufferEndsInWhitespace: buffer.last?.isWhitespace ?? false)
+        work = Self.truncateAtDegenerateRepetition(work)
         work = Self.capWords(work, maxWords: maxWords)
 
         guard Self.isMeaningful(work) else { return nil }
         return work
+    }
+
+    /// Cuts a completion short at the point it starts looping.
+    ///
+    /// Small models fall into degenerate repetition on short prompts — "The quick "
+    /// produced "mouse mouse mouse mouse mouse mouse". A repetition penalty during
+    /// sampling makes this rare but not impossible, and showing a visible loop
+    /// reads as broken, so it is also caught here where it can be tested.
+    ///
+    /// Genuine English repeats a word twice ("had had", "that that"), so only a
+    /// third consecutive occurrence counts as a loop.
+    static func truncateAtDegenerateRepetition(_ s: String) -> String {
+        let leading = s.hasPrefix(" ") ? " " : ""
+        let words = s.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard words.count >= 3 else { return s }
+
+        var kept: [String] = []
+        var runLength = 0
+        var previous: String?
+
+        for word in words {
+            let normalized = word.lowercased()
+            if normalized == previous {
+                runLength += 1
+            } else {
+                runLength = 1
+                previous = normalized
+            }
+            guard runLength < 3 else { break }
+            kept.append(word)
+        }
+
+        guard kept.count < words.count else { return s }
+        return leading + kept.joined(separator: " ")
     }
 
     /// The leading whitespace (if any) plus the next non-whitespace run, so

@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ApplicationServices
 import IOKit.hid
+import GhostTextInference
 
 enum Permissions {
     static func promptAll() {
@@ -23,6 +24,16 @@ enum Permissions {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = GhostTextController()
     private let probe = AXProbe()
+
+    /// Instruct model with ChatML assistant-prefill framing. The bench found the
+    /// base model and the instruct model fed raw text both drift into quiz and
+    /// fill-in-the-blank artifacts; prefilling an assistant turn that is never
+    /// closed keeps it continuing the sentence. See BENCH.md.
+    private let engine = CompletionEngine(
+        modelID: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        framing: .chatPrefill
+    )
+    private(set) var modelReady = false
     private(set) var probeRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -37,10 +48,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         GhostTextControllerHolder.shared = controller
         AXProbeHolder.shared = probe
-        controller.setEnabled(true)
+        loadModel()
 
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.run(controller: controller)
+        }
+    }
+
+    /// The tap stays off until the model is warm. Suggesting a placeholder would
+    /// mean a stray Tab inserting junk into whatever the user is actually typing.
+    private func loadModel() {
+        Task { [engine, controller] in
+            let started = ProcessInfo.processInfo.systemUptime
+            do {
+                try await engine.warmup()
+            } catch {
+                FileLog.app("model warmup FAILED: \(error) — staying disabled")
+                return
+            }
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            FileLog.app(String(format: "model warm in %.1fs", elapsed))
+
+            controller.completionProvider = { buffer in
+                try? await engine.complete(buffer: buffer, maxTokens: 12)
+            }
+            self.modelReady = true
+            controller.setEnabled(true)
         }
     }
 
