@@ -240,8 +240,9 @@ final class GhostTextController {
 
             guard !Task.isCancelled else { return }
             let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            let cacheReport = await engine.debugCacheReport
             if let final, sanitizer.sanitize(raw: final, buffer: text) != nil {
-                FileLog.app("completion \(Int(elapsed))ms -> \(final.debugDescription)")
+                FileLog.app("completion \(Int(elapsed))ms \(cacheReport) -> \(final.debugDescription)")
             } else {
                 FileLog.app("completion rejected by sanitizer (\(Int(elapsed))ms) raw=\(final?.debugDescription ?? "nil")")
             }
