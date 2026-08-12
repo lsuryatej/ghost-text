@@ -325,4 +325,64 @@ final class CompletionSanitizerTests: XCTestCase {
         let sanitizer = CompletionSanitizer()
         XCTAssertEqual(sanitizer.sanitize(raw: "a sense of... calm", buffer: "he felt "), "a sense of... calm")
     }
+
+    // MARK: - Leaked chat-template tokens
+
+    /// Observed from Gemma: a terminator decoded as text, then multilingual junk.
+    func testTruncatesAtLeakedEndOfTurn() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: "ing.<end_of_turn>\u{09B8}\u{09AE}<end_of_turn>", buffer: "absolutely gorg"),
+            "ing."
+        )
+    }
+
+    func testTruncatesAtLeakedChatMLToken() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: " report?<|im_end|>more", buffer: "the quarterly"), " report?")
+    }
+
+    func testTruncatesAtLeakedThinkTag() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertNil(sanitizer.sanitize(raw: "<think>hmm</think>", buffer: "we should "))
+    }
+
+    func testOrdinaryAngleBracketTextSurvives() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "x < y always", buffer: "given "), "x < y always")
+    }
+
+    // MARK: - Restarted mid-word
+
+    /// Observed from Gemma: the model restarts the word being typed.
+    func testDropsRestartedWordFragment() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(
+            sanitizer.sanitize(raw: " report?", buffer: "Can you send me the quarterly rep"),
+            "ort?"
+        )
+    }
+
+    func testDropsRestartedWordWithoutLeadingSpace() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "reconsider this", buffer: "We should reconsi"), "der this")
+    }
+
+    /// Buffer ends on a complete word, so a repeat is the model's choice, not a
+    /// restart, and must not be mangled.
+    func testCompleteWordFollowedBySpaceIsNotTreatedAsRestart() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "reports are due", buffer: "the quarterly "), "reports are due")
+    }
+
+    func testDoesNotFireWhenCompletionEndsTheWordExactly() {
+        let sanitizer = CompletionSanitizer()
+        // "rep" + "rep" with nothing following is not a continuation.
+        XCTAssertEqual(sanitizer.sanitize(raw: " rep done", buffer: "the rep"), " rep done")
+    }
+
+    func testSingleLetterFragmentIsIgnored() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "apple pie", buffer: "an a"), "apple pie")
+    }
 }

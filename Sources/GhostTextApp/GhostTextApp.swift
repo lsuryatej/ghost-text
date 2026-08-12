@@ -20,26 +20,6 @@ enum Permissions {
     }
 }
 
-/// The models offered in the menu, with the trade-off each one makes.
-enum ModelChoice: String, CaseIterable {
-    case fast = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
-    case balanced = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-
-    var title: String {
-        switch self {
-        case .fast: return "Fast (0.5B) — ~70ms"
-        case .balanced: return "Better (1.5B) — ~135ms"
-        }
-    }
-
-    static var current: ModelChoice {
-        get {
-            UserDefaults.standard.string(forKey: "modelID").flatMap(ModelChoice.init(rawValue:)) ?? .fast
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "modelID") }
-    }
-}
-
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = GhostTextController()
@@ -49,9 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// base model and the instruct model fed raw text both drift into quiz and
     /// fill-in-the-blank artifacts; prefilling an assistant turn that is never
     /// closed keeps it continuing the sentence. See BENCH.md.
-    private var engine = CompletionEngine(modelID: ModelChoice.current.rawValue, framing: .chatPrefill)
+    private var engine = CompletionEngine(modelID: ModelChoice.current.id)
     private(set) var modelReady = false
     private(set) var activeModel = ModelChoice.current
+    private(set) var loadProgress: Double = 0
+    let instructions = InstructionsStore()
     private(set) var probeRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -62,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         FileLog.app("app log:   \(FileLog.app.url.path)")
         FileLog.app("probe log: \(FileLog.probe.url.path)")
 
+        instructions.createTemplateIfMissing()
         Permissions.promptAll()
 
         GhostTextControllerHolder.shared = controller
@@ -81,20 +64,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ModelChoice.current = choice
         activeModel = choice
         modelReady = false
+        loadProgress = 0
         controller.setEnabled(false)
         controller.engine = nil
-        engine = CompletionEngine(modelID: choice.rawValue, framing: .chatPrefill)
-        FileLog.app("switching model to \(choice.rawValue)")
+        engine = CompletionEngine(modelID: choice.id)
+        FileLog.app("switching model to \(choice.id)")
         loadModel()
     }
 
     private func loadModel() {
         let engine = self.engine
         let controller = self.controller
+        let instructionText = instructions.current()
         Task {
             let started = ProcessInfo.processInfo.systemUptime
             do {
-                try await engine.warmup()
+                await engine.setInstructions(instructionText)
+                try await engine.warmup { fraction in
+                    Task { @MainActor in self.loadProgress = fraction }
+                }
             } catch {
                 FileLog.app("model warmup FAILED: \(error) — staying disabled")
                 return
@@ -103,7 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileLog.app(String(format: "model warm in %.1fs", elapsed))
 
             controller.engine = engine
+            controller.instructionsProvider = { [weak self] in self?.instructions.current() }
             self.modelReady = true
+            self.loadProgress = 1
             controller.setEnabled(true)
         }
     }
@@ -139,13 +129,21 @@ struct GhostTextApp: App {
             Button("Request permissions…") { Permissions.promptAll() }
             Button("Log permission status") { FileLog.app(Permissions.report()) }
             Divider()
-            Menu("Model") {
-                ForEach(ModelChoice.allCases, id: \.rawValue) { choice in
-                    Button(choice == delegate.activeModel ? "\u{2713} \(choice.title)" : "   \(choice.title)") {
-                        delegate.selectModel(choice)
+            Menu(delegate.modelReady
+                ? "Model: \(delegate.activeModel.name)"
+                : "Model: downloading \(Int(delegate.loadProgress * 100))%") {
+                Section("Recommended") {
+                    ForEach(ModelChoice.catalog.filter(\.recommended)) { choice in
+                        modelButton(choice)
+                    }
+                }
+                Section("Other") {
+                    ForEach(ModelChoice.catalog.filter { !$0.recommended }) { choice in
+                        modelButton(choice)
                     }
                 }
             }
+            Button("Edit custom instructions\u{2026}") { delegate.instructions.reveal() }
             Divider()
             Button(delegate.probeRunning ? "Stop AX probe" : "Start AX probe") { delegate.toggleProbe() }
             Button("Write AX probe summary") { delegate.writeProbeSummary() }
@@ -156,6 +154,13 @@ struct GhostTextApp: App {
             Button("Quit Ghost Text") { NSApplication.shared.terminate(nil) }
         } label: {
             Image(systemName: enabled ? "text.cursor" : "moon.zzz")
+        }
+    }
+
+    @ViewBuilder
+    private func modelButton(_ choice: ModelChoice) -> some View {
+        Button(choice.id == delegate.activeModel.id ? "\u{2713} \(choice.displayName)" : "   \(choice.displayName)") {
+            delegate.selectModel(choice)
         }
     }
 }

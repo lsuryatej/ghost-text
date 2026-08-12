@@ -49,12 +49,24 @@ public enum PromptFraming: Sendable, Equatable {
     /// for the model to continue.
     case chatPrefill
 
+    /// ChatML with an empty reasoning block already closed. Qwen3 models are
+    /// hybrid reasoners and will otherwise open a `<think>` block and spend the
+    /// whole token budget deliberating instead of finishing the sentence.
+    case qwen3Prefill
+
+    /// Gemma uses `<start_of_turn>` / `<end_of_turn>` rather than ChatML, and
+    /// names the assistant role "model". Feeding it ChatML produces the tags as
+    /// literal output.
+    case gemmaPrefill
+
     /// Pick `.chatPrefill` for model IDs that look instruct-tuned (contain
     /// "instruct", "chat", or "it" as a path component, case-insensitively),
     /// `.raw` otherwise. This is a heuristic, not a guarantee — verify actual
     /// continuation behavior per model with `ghost-bench --quality`.
     public static func inferred(fromModelID modelID: String) -> PromptFraming {
         let lowered = modelID.lowercased()
+        if lowered.contains("gemma") { return .gemmaPrefill }
+        if lowered.contains("qwen3") { return .qwen3Prefill }
         let instructMarkers = ["instruct", "-chat", "_chat", "-it-", "-it"]
         return instructMarkers.contains(where: lowered.contains) ? .chatPrefill : .raw
     }
@@ -70,6 +82,14 @@ public actor CompletionEngine {
     private let modelID: String
     private let framing: PromptFraming
     private var container: ModelContainer?
+    private var instructions: String?
+
+    /// Writer-supplied guidance folded into every prompt. Changing it does not
+    /// require reloading the model.
+    public func setInstructions(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        instructions = (trimmed?.isEmpty ?? true) ? nil : trimmed
+    }
 
     /// Lowered from the original 12 after `ghost-bench` data (see BENCH.md's
     /// "Retuning maxTokens" section) showed boundary-stop ends most
@@ -98,20 +118,30 @@ public actor CompletionEngine {
         switch framing {
         case .raw: return "raw"
         case .chatPrefill: return "chatPrefill"
+        case .qwen3Prefill: return "qwen3Prefill"
+        case .gemmaPrefill: return "gemmaPrefill"
         }
     }
 
     /// Downloads (if needed), loads, and runs one throwaway generation so
     /// Metal kernels are compiled before the first user-visible request.
     /// Idempotent: calling it again after a successful warmup is a no-op.
-    public func warmup() async throws {
+    public func warmup(progress: (@Sendable (Double) -> Void)? = nil) async throws {
         if container != nil { return }
 
-        let configuration = ModelConfiguration(id: modelID)
+        // Without these the chat-template terminators are decoded as literal
+        // text and generation runs on past the end of the turn into multilingual
+        // garbage - Gemma emitted "<end_of_turn>" mid-completion followed by
+        // tokens from three other scripts.
+        let configuration = ModelConfiguration(
+            id: modelID,
+            extraEOSTokens: ["<end_of_turn>", "<|im_end|>", "<start_of_turn>", "<|endoftext|>", "<eos>"]
+        )
         let loaded = try await LLMModelFactory.shared.loadContainer(
             from: #hubDownloader(),
             using: #huggingFaceTokenizerLoader(),
-            configuration: configuration
+            configuration: configuration,
+            progressHandler: { p in progress?(p.fractionCompleted) }
         )
         self.container = loaded
 
@@ -302,31 +332,54 @@ public actor CompletionEngine {
     static let maxSuffixContext = 160
 
     private func framedPrompt(for buffer: String, suffix: String?) -> String {
-        let trailing = Self.usableSuffix(suffix)
+        if case .raw = framing { return buffer }
+
+        let task = "Continue writing the following text with the next few words only."
+            + " No preamble, no explanation, no repeating the instructions."
+
+        var brief = ""
+        if let instructions {
+            brief += "About the writer and how they write:\n\(instructions)\n\n"
+        }
+        brief += task
+        if let trailing = Self.usableSuffix(suffix) {
+            brief += "\nThe text already continues after the cursor with: \"\(trailing)\""
+            brief += "\nYour continuation must lead naturally into that and must not repeat it."
+        }
+
         switch framing {
         case .raw:
-            // Base models have no way to be told about a suffix; a bare
-            // continuation is all they can act on.
             return buffer
+
         case .chatPrefill:
-            if let trailing {
-                return """
-                    <|im_start|>user
-                    Continue writing the following text with the next few words only. No preamble, no explanation, no repeating the instructions.
-                    The text already continues after the cursor with: "\(trailing)"
-                    Your continuation must lead naturally into that and must not repeat it.<|im_end|>
-                    <|im_start|>assistant
-                    \(buffer)
-                    """
-            }
-            // Deliberately NOT closed with <|im_end|>: leaving the assistant
-            // turn open makes the model continue its own in-progress
-            // utterance (the user's buffer) instead of starting a fresh,
-            // conversational reply.
+            // Deliberately NOT closed: leaving the assistant turn open makes the
+            // model continue the user's in-progress sentence rather than reply.
             return """
                 <|im_start|>user
-                Continue writing the following text with the next few words only. No preamble, no explanation, no repeating the instructions.<|im_end|>
+                \(brief)<|im_end|>
                 <|im_start|>assistant
+                \(buffer)
+                """
+
+        case .qwen3Prefill:
+            // The pre-closed empty think block is the documented way to put a
+            // hybrid Qwen3 model into non-reasoning mode.
+            return """
+                <|im_start|>user
+                \(brief)<|im_end|>
+                <|im_start|>assistant
+                <think>
+
+                </think>
+
+                \(buffer)
+                """
+
+        case .gemmaPrefill:
+            return """
+                <start_of_turn>user
+                \(brief)<end_of_turn>
+                <start_of_turn>model
                 \(buffer)
                 """
         }

@@ -200,60 +200,32 @@ cancellation actually stops generation rather than running to completion in the 
 ## Quality
 
 <!-- QUALITY:BEGIN -->
-### `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+### `mlx-community/gemma-3-1b-it-4bit`
 
-maxTokens=12. Framing: `chatPrefill`.
-
-| Buffer | Completion |
-|---|---|
-| `I was thinking that maybe we could` | ` start with a new project idea for this` |
-| `The report shows a significant` | ` increase in customer satisfaction scores, indicating that the` |
-| `She opened the door and` | ` stepped inside to find a cozy room with` |
-| `He walked into the room and immediately` | ` felt a sense of calm wash over him` |
-| `According to the latest data, the company` | `'s revenue increased by 5% this quarter.` |
-| `The weather this weekend is supposed to be absolutely gorg` | `onzola, with a high chance of sunny spells` |
-| `Can you send me the quarterly rep` | `urchase summary?` |
-| `I really appreciate you taking the time to expl` | `aine me about this topic.⏎` |
-| `We should probably reconsi` | `errate our approach to this project.⏎⏎` |
-| `The recipe calls for two cups of all-purp` | `ulent ingredients.⏎⏎` |
-| `Thanks so much for your help. ` | ` I'm here to assist you with any question` |
-| `Let me know what you think. ` | ` What's your idea?` |
-| `That sounds like a great plan. ` | ` What's next?` |
-| `Once the meeting wraps up,` | ` Sarah reflects on her day and what she` |
-| `If the weather holds,` | ` we can enjoy a day of relaxation and` |
-| `After a long day at the office,` | ` she took a walk in the park to` |
-| `The stock market fell sharply after the announcement.` | `` |
-| `Once upon a time, in a village near the coast, there lived` | ` a young girl named Lily who loved to` |
-| `In conclusion, the evidence strongly suggests` | ` that the person who committed the crime was` |
-| `My favorite thing about the new apartment is` | ` that it's much smaller than my old one` |
-
-
-### `mlx-community/Qwen2.5-1.5B-Instruct-4bit`
-
-maxTokens=12. Framing: `chatPrefill`.
+maxTokens=12. Framing: `gemmaPrefill`.
 
 | Buffer | Completion |
 |---|---|
-| `I was thinking that maybe we could` | `... organize a picnic in the park. It` |
-| `The report shows a significant` | ` increase in global temperatures over past decades.` |
-| `She opened the door and` | ` stepped inside, feeling a mix of excitement and` |
-| `He walked into the room and immediately` | ` felt a sense of... tranquility.` |
-| `According to the latest data, the company` | `'s profits have increased by 20% over last` |
-| `The weather this weekend is supposed to be absolutely gorg` | `on...` |
-| `Can you send me the quarterly rep` | `ot? I` |
-| `I really appreciate you taking the time to expl` | `a...` |
-| `We should probably reconsi` | `...` |
-| `The recipe calls for two cups of all-purp` | `сe flour, one cup of sugar, and a` |
-| `Thanks so much for your help. ` | ` I really appreciate it.` |
-| `Let me know what you think. ` | ` Let's move on to the next item.` |
-| `That sounds like a great plan. ` | ` Let's get started right away!` |
-| `Once the meeting wraps up,` | ` John heads to his office for a quiet` |
-| `If the weather holds,` | ` we'll head to the beach tomorrow.` |
-| `After a long day at the office,` | ` I finally got home and collapsed on my` |
+| `I was thinking that maybe we could` | ` explore a slightly different angle on this, focusing` |
+| `The report shows a significant` | ` dip in sales last quarter, correlating with the` |
+| `She opened the door and` | ` stepped into a world of muted colors and` |
+| `He walked into the room and immediately` | ` noticed the faint scent of cinnamon.` |
+| `According to the latest data, the company` | `’s profits have increased by 15%.` |
+| `The weather this weekend is supposed to be absolutely gorg` | `ing.` |
+| `Can you send me the quarterly rep` | ` report?` |
+| `I really appreciate you taking the time to expl` | `icate this request.` |
+| `We should probably reconsi` | `ider this approach.` |
+| `The recipe calls for two cups of all-purp` | `url sugar.` |
+| `Thanks so much for your help. ` | `⏎⏎` |
+| `Let me know what you think. ` | `⏎⏎` |
+| `That sounds like a great plan. ` | `⏎⏎` |
+| `Once the meeting wraps up,` | ` I’ll send a brief email summarizing the key` |
+| `If the weather holds,` | ` we’ll explore the coastline.` |
+| `After a long day at the office,` | ` she finally allowed herself to exhale and step` |
 | `The stock market fell sharply after the announcement.` | `` |
-| `Once upon a time, in a village near the coast, there lived` | ` an old man named Mr. Smith` |
-| `In conclusion, the evidence strongly suggests` | ` that...` |
-| `My favorite thing about the new apartment is` | ` the view.` |
+| `Once upon a time, in a village near the coast, there lived` | ` a young woman named Elara.` |
+| `In conclusion, the evidence strongly suggests` | ` a connection between the observed anomalies and fluctuations` |
+| `My favorite thing about the new apartment is` | ` the light spilling through the windows during the` |
 
 
 <!-- QUALITY:END -->
