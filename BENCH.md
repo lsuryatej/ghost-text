@@ -28,19 +28,34 @@ re-prefilling the whole buffer on every pause. That's only true if a full re-pro
 ## Latency
 
 <!-- LATENCY:BEGIN -->
-### `mlx-community/Qwen2.5-1.5B-Instruct-4bit`
+### `mlx-community/gemma-3-1b-it-4bit`
 
-Cold load (download-if-needed + weight load + first-token Metal kernel compile): **106.87s**
+Cold load (download-if-needed + weight load + first-token Metal kernel compile): **1.62s**
 
-8 samples per buffer length, maxTokens=10. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
+6 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
 
 | Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
 |---|---|---|---|---|---|---|---|
-| 20 chars | 82ms | 108ms | 108ms | 25ms | 26ms | 51ms | 77ms |
-| 50 chars | 92ms | 110ms | 110ms | 25ms | 27ms | 60ms | 78ms |
-| 100 chars | 58ms | 59ms | 59ms | 26ms | 27ms | 26ms | 27ms |
-| 200 chars | 46ms | 48ms | 48ms | 40ms | 41ms | 0ms | 0ms |
-| 400 chars | 124ms | 126ms | 126ms | 42ms | 43ms | 76ms | 77ms |
+| 20 chars | 131ms | 132ms | 132ms | 33ms | 33ms | 6ms | 6ms |
+| 50 chars | 166ms | 180ms | 180ms | 33ms | 37ms | 38ms | 51ms |
+| 100 chars | 135ms | 137ms | 137ms | 33ms | 35ms | 6ms | 7ms |
+| 200 chars | 136ms | 773ms | 773ms | 38ms | 675ms | 6ms | 7ms |
+| 400 chars | 150ms | 151ms | 151ms | 40ms | 40ms | 18ms | 19ms |
+
+
+### `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+
+Cold load (download-if-needed + weight load + first-token Metal kernel compile): **0.63s**
+
+6 samples per buffer length, maxTokens=12. "total" is end-to-end `complete()` wall time; prefill/decode are the engine's own breakdown.
+
+| Buffer length | p50 total | p95 total | max total | p50 prefill | p95 prefill | p50 decode | p95 decode |
+|---|---|---|---|---|---|---|---|
+| 20 chars | 29ms | 43ms | 43ms | 10ms | 11ms | 16ms | 29ms |
+| 50 chars | 39ms | 40ms | 40ms | 11ms | 11ms | 26ms | 26ms |
+| 100 chars | 30ms | 33ms | 33ms | 11ms | 11ms | 16ms | 19ms |
+| 200 chars | 46ms | 48ms | 48ms | 14ms | 14ms | 29ms | 31ms |
+| 400 chars | 37ms | 44ms | 44ms | 14ms | 18ms | 19ms | 26ms |
 
 
 <!-- LATENCY:END -->
@@ -278,3 +293,48 @@ default).**
 - Net: the instruct-tuned model, driven with the assistant-prefill trick instead of its normal
   chat template, gives the more reliable continuation behavior *and* isn't the slower option.
   There's no tradeoff to accept here.
+
+---
+
+## Prefix KV cache, and why the earlier verdict flipped
+
+The original verdict here was "skip KV-cache reuse": a full re-prompt at a
+200-character buffer cost 115ms p50, prefill was flat at ~20ms, and decode
+dominated. That was correct *for what was being measured at the time* — short
+prompts, no constant prefix.
+
+Custom instructions changed the shape of the problem. A ~600-character
+instructions block sits at the front of every prompt and was re-prefilled on
+every keystroke:
+
+| Model | no instructions | with instructions | with instructions + prefix cache |
+|---|---|---|---|
+| Qwen2.5 0.5B | 67-86ms | 99-116ms | **68-84ms** |
+| Gemma 3 1B | 198-271ms | 756-876ms | 550-850ms |
+
+Consecutive keystrokes produce nearly identical prompts, so the cache reaches
+~97% reuse (measured: 261 of 262 tokens). For Qwen that erases the cost of
+instructions entirely — they are now effectively free.
+
+Two things the instrumentation settled that guesswork would not have:
+
+**The cache is not why Gemma is slow.** Reuse is confirmed working on Gemma too
+(251 of 259 tokens, `cache=trimmable`), and it is still 550-850ms. Prefill was
+never the bottleneck for it.
+
+**Neither is the repetition penalty.** Disabling it entirely — a plausible
+suspect, since it scans a 262k-entry logit vector per token — changed nothing
+(524-802ms). Gemma 3 1B's decode is simply ~8x slower than Qwen2.5 0.5B's in
+this configuration, against ~4x in isolated benchmarks.
+
+## Model latency vs quality, measured in the app
+
+| Model | e2e per completion | Mid-word quality |
+|---|---|---|
+| Qwen2.5 0.5B | 68-84ms | poor: "reconsi" -> "errate" |
+| Gemma 3 1B | 550-850ms | good: "reconsi" -> "ider this approach" |
+
+Gemma 3 1B writes noticeably better prose and is the only small model tested
+that handles mid-word continuation, but it costs roughly 8x the latency. That
+is a real trade rather than a bug, and it is why the model is switchable from
+the menu instead of being a build-time decision.

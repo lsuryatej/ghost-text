@@ -82,13 +82,35 @@ public actor CompletionEngine {
     private let modelID: String
     private let framing: PromptFraming
     private var container: ModelContainer?
+
+    /// Holds the KV cache across requests.
+    ///
+    /// Boxed in a class because generation runs on the `ModelContainer`'s actor,
+    /// not this one, so the cache has to be mutable from inside that closure.
+    /// Generation is serialised there, so there is only ever one writer.
+    private final class CacheBox: @unchecked Sendable {
+        var cache: [KVCache]?
+        var tokens: [Int] = []
+        /// Diagnostics: how the last request resolved against the cache.
+        var lastReport = "cache=none"
+
+        func reset() {
+            cache = nil
+            tokens = []
+        }
+    }
+    private let cacheBox = CacheBox()
     private var instructions: String?
 
     /// Writer-supplied guidance folded into every prompt. Changing it does not
     /// require reloading the model.
     public func setInstructions(_ text: String?) {
         let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
-        instructions = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        let new = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard new != instructions else { return }
+        instructions = new
+        // The prefix changed underneath the cache.
+        cacheBox.reset()
     }
 
     /// Lowered from the original 12 after `ghost-bench` data (see BENCH.md's
@@ -110,6 +132,9 @@ public actor CompletionEngine {
 
     /// `true` once `warmup()` has completed successfully.
     public var isReady: Bool { container != nil }
+
+    /// Diagnostics for the most recent request's cache behaviour.
+    public var debugCacheReport: String { cacheBox.lastReport }
 
     /// The prompt framing this engine resolved to for `modelID`. Exposed for
     /// diagnostics (`ghost-bench --quality` prints it); not meant for
@@ -144,6 +169,7 @@ public actor CompletionEngine {
             progressHandler: { p in progress?(p.fractionCompleted) }
         )
         self.container = loaded
+        cacheBox.reset()
 
         // Throwaway generation: compiles every Metal kernel the real request
         // path will hit, so the user's first completion isn't the one that
@@ -235,12 +261,26 @@ public actor CompletionEngine {
                 generationTokenCount: 0, firstTokenTime: nil, stoppedAtBoundary: false)
         }
 
+        // Drop a request that was superseded while it waited.
+        //
+        // The actor serialises generation, so requests queue. Cancelling the
+        // calling Task does not remove a queued call - it only takes effect once
+        // the body runs and checks. Without this, typing faster than the model
+        // generates makes every keystroke queue a full generation behind the
+        // last, and latency snowballs: a 100ms model produced 2.1s completions.
+        try Task.checkCancellation()
+
         let promptText = framedPrompt(for: buffer, suffix: suffix)
         let callStart = Date()
 
+        let cacheBox = self.cacheBox
+
         return try await container.perform { context in
+            // Checked again inside: the wait to enter `perform` is itself a
+            // queue, and this is the last point before real work begins.
+            try Task.checkCancellation()
             let promptTokens = context.tokenizer.encode(text: promptText, addSpecialTokens: true)
-            let lmInput = LMInput(tokens: MLXArray(promptTokens))
+
             // A 0.5B model at low temperature falls into degenerate loops on short
             // prompts — "The quick " produced "mouse mouse mouse mouse mouse mouse".
             // The penalty is what breaks the loop; the context size only needs to
@@ -252,10 +292,43 @@ public actor CompletionEngine {
                 repetitionContextSize: 20
             )
 
+            // Reuse the KV cache for whatever prefix has not changed.
+            //
+            // Consecutive keystrokes produce almost identical prompts: the same
+            // instructions, the same document context, one more character. Without
+            // this the whole thing is prefilled again every time, which is what
+            // made a 600-character instructions block cost ~550ms per keystroke on
+            // Gemma - its 262k vocabulary makes prefill far more expensive than
+            // Qwen's. Reusing the prefix turns that into near zero.
+            var reusedPrefix = 0
+            var trimmable = true
+            var cache = cacheBox.cache
+            if let existing = cache, !canTrimPromptCache(existing) { trimmable = false }
+            if let existing = cache, trimmable {
+                let shared = zip(cacheBox.tokens, promptTokens).prefix { $0 == $1 }.count
+                // Always leave at least one token to feed: a model cannot be asked
+                // to generate from an empty input.
+                reusedPrefix = min(shared, promptTokens.count - 1)
+                let drop = existing[0].offset - reusedPrefix
+                if drop < 0 || trimPromptCache(existing, numTokens: drop) != drop {
+                    cache = nil
+                    reusedPrefix = 0
+                }
+            } else {
+                cache = nil
+            }
+            if cache == nil || !trimmable {
+                cache = context.model.newCache(parameters: parameters)
+                reusedPrefix = 0
+            }
+            cacheBox.lastReport = "cache=\(trimmable ? "trimmable" : "NOT-TRIMMABLE") reuse=\(reusedPrefix)/\(promptTokens.count)tok"
+
+            let feedTokens = Array(promptTokens[reusedPrefix...])
+            let lmInput = LMInput(tokens: MLXArray(feedTokens))
             let iterator = try TokenIterator(
                 input: lmInput,
                 model: context.model,
-                cache: nil,
+                cache: cache,
                 parameters: parameters
             )
 
@@ -265,6 +338,12 @@ public actor CompletionEngine {
                 tokenizer: context.tokenizer,
                 iterator: iterator
             )
+
+            // Keep the cache for the next request, remembering exactly which
+            // tokens it holds so the next prefix comparison is honest.
+            let resolvedCache = cache
+            cacheBox.cache = resolvedCache
+            cacheBox.tokens = promptTokens
 
             var result = ""
             var info: GenerateCompletionInfo?
