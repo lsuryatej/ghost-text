@@ -20,6 +20,26 @@ enum Permissions {
     }
 }
 
+/// The models offered in the menu, with the trade-off each one makes.
+enum ModelChoice: String, CaseIterable {
+    case fast = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+    case balanced = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
+    var title: String {
+        switch self {
+        case .fast: return "Fast (0.5B) — ~70ms"
+        case .balanced: return "Better (1.5B) — ~135ms"
+        }
+    }
+
+    static var current: ModelChoice {
+        get {
+            UserDefaults.standard.string(forKey: "modelID").flatMap(ModelChoice.init(rawValue:)) ?? .fast
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "modelID") }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = GhostTextController()
@@ -29,11 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// base model and the instruct model fed raw text both drift into quiz and
     /// fill-in-the-blank artifacts; prefilling an assistant turn that is never
     /// closed keeps it continuing the sentence. See BENCH.md.
-    private let engine = CompletionEngine(
-        modelID: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-        framing: .chatPrefill
-    )
+    private var engine = CompletionEngine(modelID: ModelChoice.current.rawValue, framing: .chatPrefill)
     private(set) var modelReady = false
+    private(set) var activeModel = ModelChoice.current
     private(set) var probeRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -57,8 +75,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The tap stays off until the model is warm. Suggesting a placeholder would
     /// mean a stray Tab inserting junk into whatever the user is actually typing.
+    /// Swaps the model without a restart: suspend, warm the new one, resume.
+    func selectModel(_ choice: ModelChoice) {
+        guard choice != activeModel else { return }
+        ModelChoice.current = choice
+        activeModel = choice
+        modelReady = false
+        controller.setEnabled(false)
+        controller.engine = nil
+        engine = CompletionEngine(modelID: choice.rawValue, framing: .chatPrefill)
+        FileLog.app("switching model to \(choice.rawValue)")
+        loadModel()
+    }
+
     private func loadModel() {
-        Task { [engine, controller] in
+        let engine = self.engine
+        let controller = self.controller
+        Task {
             let started = ProcessInfo.processInfo.systemUptime
             do {
                 try await engine.warmup()
@@ -105,6 +138,14 @@ struct GhostTextApp: App {
             Divider()
             Button("Request permissions…") { Permissions.promptAll() }
             Button("Log permission status") { FileLog.app(Permissions.report()) }
+            Divider()
+            Menu("Model") {
+                ForEach(ModelChoice.allCases, id: \.rawValue) { choice in
+                    Button(choice == delegate.activeModel ? "\u{2713} \(choice.title)" : "   \(choice.title)") {
+                        delegate.selectModel(choice)
+                    }
+                }
+            }
             Divider()
             Button(delegate.probeRunning ? "Stop AX probe" : "Start AX probe") { delegate.toggleProbe() }
             Button("Write AX probe summary") { delegate.writeProbeSummary() }

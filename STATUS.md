@@ -13,11 +13,11 @@ started. A wrong tick makes the whole list useless, so when in doubt it is `[~]`
 | 4. Autocorrect | `[ ]` | Not started. Password fields are handled (§30) |
 | 5. Emoji | `[ ]` | Not started |
 | 6. Multilingual | `[~]` | Key decoding is layout-correct via UCKeyTranslate and handles IME/dead keys; the model is English-weighted |
-| 7. Context acquisition | `[~]` | Text before and after the caret, 600/200 char window. No screen or clipboard context |
+| 7. Context acquisition | `[~]` | Text before *and after* the caret, 600/200 char window, both fed to the model. No screen or clipboard context |
 | 8-9. Personalization | `[ ]` | Nothing is learned or stored. Deliberate for now — see non-goals |
 | 10. Custom AI instructions | `[ ]` | Not started |
 | 11. Completion length | `[~]` | Boundary-stop at sentence/newline/~8 words; not user-configurable |
-| 12. Local model layer | `[~]` | One model, in-process MLX, warm at launch. No catalog, no switching |
+| 12. Local model layer | `[~]` | Two models, switchable from the menu without restart. No download UI or progress |
 | 13. Low-latency inference | `[x]` | Debounce, cancellation, warm model, streaming, boundary-stop, off-main-thread. 67-94ms end to end |
 | 14. Ranking / filtering | `[x]` | Empty, echo, repetition, markdown and whitespace all handled in `CompletionSanitizer` |
 | 15. Inline rendering | `[x]` | Click-through overlay, real font from AX, baseline-aligned, screen-edge clamped |
@@ -75,6 +75,7 @@ started. A wrong tick makes the whole list useless, so when in doubt it is `[~]`
 - [x] Text before the caret (600 chars) and after (200 chars)
 - [x] Merged with the keystroke buffer, reconciling AX lag
 - [x] Falls back to the buffer alone where AX text is unavailable
+- [x] Text after the caret is passed to the model as trailing context, capped at 160 chars
 - [ ] Screen-aware context (needs Screen Recording)
 - [ ] Clipboard context
 
@@ -83,16 +84,16 @@ started. A wrong tick makes the whole list useless, so when in doubt it is `[~]`
 Ordered by what makes this better to use daily, which given the feedback so far
 means quality and control before breadth.
 
-**1. Suggestion quality (P0, unlabelled in the spec but the real gap).**
-The plumbing is fast; the predictions are mediocre because a 0.5B model is small.
-Worth trying, roughly in cost order: a larger model (1.5B-3B, measure the latency
-cost against the 67-94ms baseline), better prompt framing now that real context is
-available, and using the text *after* the caret, which is already read but not yet
-fed to the model.
+**1. Mid-word completion (P0, the sharpest remaining quality gap).**
+Both models produce nonsense when the caret sits inside a partial word: "gorg" ->
+"onzola", "all-purp" -> "ulent", "reconsi" -> "errate". Whole-word contexts are
+fine, so this is specifically about continuing a token fragment through ChatML
+framing. Worth trying raw framing for the fragment case, or a base model, or
+suppressing suggestions mid-word entirely until it is solved.
 
-**2. Model catalog and switching (§12, P1).** Directly serves item 1 and is the
-main lever a user has over the quality/latency trade. Needs a download manager
-with progress (§31).
+**2. Download UI and a wider catalog (§12, §31, P1).** Switching between two
+models now works from the menu; what is missing is download progress (the 1.5B
+takes ~107s on first use with no feedback) and more choices.
 
 **3. Shortcut customisation and per-app toggle (§3, P0).** `Tab` is right for
 prose and wrong in some apps. Users need to rebind it and to disable Ghost Text

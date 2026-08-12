@@ -201,9 +201,10 @@ final class GhostTextController {
         guard assembled.usedAXContext || buffer.isSuggestable else { return }
 
         let text = assembled.prompt
+        let suffix = context.textAfterCaret
         guard text.filter({ !$0.isWhitespace }).count >= 3 else { return }
         suggestionRequestedAt = lastKeystroke
-        lastContextDescription = "ctx=\(assembled.usedAXContext ? "ax" : "buffer")/\(text.count)ch/\(Int(contextCost))ms"
+        lastContextDescription = "ctx=\(assembled.usedAXContext ? "ax" : "buffer")/\(text.count)ch+\(context.textAfterCaret?.count ?? 0)after/\(Int(contextCost))ms"
 
         inFlight?.cancel()
         generation &+= 1
@@ -225,7 +226,7 @@ final class GhostTextController {
             // completion. Decode dominates end-to-end time, so this is most of
             // the perceived latency win - the ghost text appears after roughly
             // one decode step rather than ten.
-            let final = try? await engine.completeStreaming(buffer: text, maxTokens: 10) { partial in
+            let final = try? await engine.completeStreaming(buffer: text, suffix: suffix, maxTokens: 10) { partial in
                 guard let cleaned = sanitizer.sanitize(raw: partial, buffer: text) else { return }
                 Task { @MainActor in
                     self?.paint(cleaned, generation: generation)

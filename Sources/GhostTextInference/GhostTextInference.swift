@@ -1,4 +1,5 @@
 import Foundation
+import GhostTextCore
 import HuggingFace
 import MLX
 import MLXHuggingFace
@@ -56,75 +57,6 @@ public enum PromptFraming: Sendable, Equatable {
         let lowered = modelID.lowercased()
         let instructMarkers = ["instruct", "-chat", "_chat", "-it-", "-it"]
         return instructMarkers.contains(where: lowered.contains) ? .chatPrefill : .raw
-    }
-}
-
-// MARK: - Completion boundary
-
-/// Decides whether a completion has reached a useful stopping point, so
-/// generation can stop before `maxTokens` instead of always running to the
-/// cap. This is next-word/phrase completion (Tab takes one word, `~` takes a
-/// short phrase) — most useful completions end well short of the token
-/// budget, and stopping early is most of the latency win: decode dominates
-/// end-to-end time (see BENCH.md), so fewer tokens decoded is fewer
-/// milliseconds on screen.
-///
-/// A pure function over the generated text alone (never touches MLX, the
-/// engine, or wall-clock time) so it is trivially unit-testable in isolation.
-public enum CompletionBoundary {
-    /// Default "roughly 8 words" cap referenced in DESIGN.md-adjacent bench
-    /// notes: `~` accepts a 2-3 word phrase and Tab accepts one word, so 8
-    /// words is already generous headroom above anything the UI shows in one
-    /// accept, while still bounding runaway completions that never hit a
-    /// terminator or newline.
-    public static let defaultWordLimit = 8
-
-    private static let terminators: Set<Character> = [".", "!", "?"]
-
-    /// `text` is the completion generated *so far* — never the original
-    /// buffer, which is not re-examined. Checked after every streamed token
-    /// (see `CompletionEngine`'s internal generation loop), so this needs to
-    /// be cheap: no regex, single pass over `text` at worst.
-    ///
-    /// Three triggers:
-    /// 1. A sentence terminator (`.`, `!`, `?`) that is either the last
-    ///    character produced so far, or immediately followed by whitespace.
-    ///    Checking "last character so far" (not waiting to confirm a
-    ///    trailing space arrives) trades a small amount of false-stop risk
-    ///    on things like mid-typing decimals (`3.14`) for not paying for an
-    ///    extra decode step just to confirm — acceptable here because a
-    ///    next-word completion stopping one token early is a non-event, and
-    ///    the model rarely emits a bare `.` mid-number as its own token
-    ///    against these prompts (verified empirically in `--quality` runs).
-    /// 2. Any newline. Completions are single-line by design; the model
-    ///    occasionally free-associates into a fresh paragraph, a bullet
-    ///    list, or a recipe ingredients block (see BENCH.md's quality
-    ///    table), none of which are useful as inline ghost text.
-    /// 3. `wordLimit` whitespace-separated words have been produced.
-    public static func isAtBoundary(_ text: String, wordLimit: Int = defaultWordLimit) -> Bool {
-        guard !text.isEmpty else { return false }
-
-        if text.contains(where: { $0.isNewline }) {
-            return true
-        }
-
-        var previous: Character?
-        for character in text {
-            if let previous, terminators.contains(previous), character.isWhitespace {
-                return true
-            }
-            previous = character
-        }
-        if let last = text.last, terminators.contains(last) {
-            return true
-        }
-
-        let wordCount = text.split(whereSeparator: { $0.isWhitespace }).count
-        if wordCount >= wordLimit {
-            return true
-        }
-
-        return false
     }
 }
 
@@ -200,8 +132,8 @@ public actor CompletionEngine {
     /// `GhostTextCore.CompletionSanitizer`'s job. Stops early at a
     /// `CompletionBoundary` (sentence end, newline, or ~8 words) rather than
     /// always running to `maxTokens`.
-    public func complete(buffer: String, maxTokens: Int = defaultMaxTokens) async throws -> String {
-        try await completeWithTiming(buffer: buffer, maxTokens: maxTokens).text
+    public func complete(buffer: String, suffix: String? = nil, maxTokens: Int = defaultMaxTokens) async throws -> String {
+        try await completeWithTiming(buffer: buffer, suffix: suffix, maxTokens: maxTokens).text
     }
 
     /// Like `complete`, but also returns the engine's own timing breakdown
@@ -209,9 +141,9 @@ public actor CompletionEngine {
     /// `maxTokens` ended generation). Used by `ghost-bench`; not part of the
     /// app's hot path, which only needs the text.
     public func completeWithTiming(
-        buffer: String, maxTokens: Int = defaultMaxTokens
+        buffer: String, suffix: String? = nil, maxTokens: Int = defaultMaxTokens
     ) async throws -> CompletionTiming {
-        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: nil)
+        try await runGeneration(buffer: buffer, suffix: suffix, maxTokens: maxTokens, onPartial: nil)
     }
 
     /// Streaming completion: `onPartial` fires with the *cumulative* text so
@@ -236,10 +168,11 @@ public actor CompletionEngine {
     /// the caller's isolation domain from inside the actor.
     public func completeStreaming(
         buffer: String,
+        suffix: String? = nil,
         maxTokens: Int = defaultMaxTokens,
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws -> String {
-        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: onPartial).text
+        try await runGeneration(buffer: buffer, suffix: suffix, maxTokens: maxTokens, onPartial: onPartial).text
     }
 
     /// Like `completeStreaming`, but also returns the timing breakdown.
@@ -248,10 +181,11 @@ public actor CompletionEngine {
     /// `completeWithTiming`'s internals.
     public func completeStreamingWithTiming(
         buffer: String,
+        suffix: String? = nil,
         maxTokens: Int = defaultMaxTokens,
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionTiming {
-        try await runGeneration(buffer: buffer, maxTokens: maxTokens, onPartial: onPartial)
+        try await runGeneration(buffer: buffer, suffix: suffix, maxTokens: maxTokens, onPartial: onPartial)
     }
 
     /// Shared generation core for all four public entry points above.
@@ -260,6 +194,7 @@ public actor CompletionEngine {
     /// cheap and always wanted).
     private func runGeneration(
         buffer: String,
+        suffix: String?,
         maxTokens: Int,
         onPartial: (@Sendable (String) -> Void)?
     ) async throws -> CompletionTiming {
@@ -270,7 +205,7 @@ public actor CompletionEngine {
                 generationTokenCount: 0, firstTokenTime: nil, stoppedAtBoundary: false)
         }
 
-        let promptText = framedPrompt(for: buffer)
+        let promptText = framedPrompt(for: buffer, suffix: suffix)
         let callStart = Date()
 
         return try await container.perform { context in
@@ -361,11 +296,29 @@ public actor CompletionEngine {
         }
     }
 
-    private func framedPrompt(for buffer: String) -> String {
+    /// Text following the caret is included as context but capped: a small model
+    /// given a long trailing passage starts summarising it instead of writing the
+    /// next few words.
+    static let maxSuffixContext = 160
+
+    private func framedPrompt(for buffer: String, suffix: String?) -> String {
+        let trailing = Self.usableSuffix(suffix)
         switch framing {
         case .raw:
+            // Base models have no way to be told about a suffix; a bare
+            // continuation is all they can act on.
             return buffer
         case .chatPrefill:
+            if let trailing {
+                return """
+                    <|im_start|>user
+                    Continue writing the following text with the next few words only. No preamble, no explanation, no repeating the instructions.
+                    The text already continues after the cursor with: "\(trailing)"
+                    Your continuation must lead naturally into that and must not repeat it.<|im_end|>
+                    <|im_start|>assistant
+                    \(buffer)
+                    """
+            }
             // Deliberately NOT closed with <|im_end|>: leaving the assistant
             // turn open makes the model continue its own in-progress
             // utterance (the user's buffer) instead of starting a fresh,
@@ -377,6 +330,22 @@ public actor CompletionEngine {
                 \(buffer)
                 """
         }
+    }
+
+    /// Trim to a sentence-ish boundary so the model is not handed a fragment
+    /// ending mid-word, and drop it entirely when there is nothing useful.
+    static func usableSuffix(_ suffix: String?) -> String? {
+        guard let suffix else { return nil }
+        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var window = String(trimmed.prefix(maxSuffixContext))
+        if trimmed.count > maxSuffixContext, let lastSpace = window.lastIndex(where: { $0.isWhitespace }) {
+            window = String(window[window.startIndex..<lastSpace])
+        }
+        // Newlines inside the quoted context confuse the ChatML framing.
+        window = window.replacingOccurrences(of: "\n", with: " ")
+        return window.isEmpty ? nil : window
     }
 }
 
