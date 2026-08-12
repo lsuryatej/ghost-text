@@ -7,7 +7,18 @@ account, no subscription. Keystrokes never leave the laptop.
 This exists because the heavy lifting already happens on your hardware. Metering that
 behind a paywall is the thing this is meant to undo.
 
-> **Status:** early development. Not yet usable.
+> **Status:** early development. The input path, the overlay and the accept keys all
+> work end to end against real apps. On-device inference is the remaining piece, so
+> what it currently suggests is a placeholder string rather than a prediction.
+
+| Piece | State |
+|---|---|
+| Menu bar app, signed bundle, permission handling | working |
+| Global keystroke tap, buffer, debounce, secure-input handling | working |
+| Caret geometry via Accessibility, with fallback ladder | working in 5 of 6 apps ([PROBE.md](PROBE.md)) |
+| Click-through ghost overlay, screen-edge clamping | working |
+| `Tab` / `~` accept, `Escape` dismiss | working |
+| On-device model | in progress |
 
 ## How it works
 
@@ -57,8 +68,18 @@ forget your grant on every rebuild.
 ## Tests
 
 ```sh
-swift test
+swift test                          # 150 unit tests, ~2s, no permissions needed
+./.build/debug/ghost-panel-demo --once   # overlay placement and clamping
+open "build/Ghost Text.app" --args --selftest   # end-to-end, types into a scratch file
 ```
+
+Most of the logic is pure and tested without launching anything. The end-to-end
+self-test exists because Ghost Text holds the Accessibility grant and a shell does
+not, so the app is the only place that can drive real keystrokes through the real
+tap. It writes to a scratch file of its own and re-checks the frontmost app before
+every key, so it never types into your documents.
+
+Both logs live in `~/Library/Logs/GhostText/`.
 
 ## License
 
