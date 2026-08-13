@@ -34,6 +34,7 @@ final class GhostTextController {
             guard let text = try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8) else { return }
             let words = text.split(separator: "\n").map(String.init)
             let completer = InstantCompleter(dictionary: words)
+            CompleteWordLookup.shared.set(Set(words.map { $0.lowercased() }))
             await MainActor.run {
                 GhostTextControllerHolder.shared?.instant = completer
                 FileLog.app("instant completer ready: \(words.count) words")
@@ -44,7 +45,11 @@ final class GhostTextController {
 
     private let decoder = KeyDecoder(layout: SystemKeyboardLayout())
     private let acceptPolicy = AcceptPolicy()
-    private let sanitizer = CompletionSanitizer()
+    // Reads CompleteWordLookup rather than `instant` directly: the sanitizer's
+    // closure has to be @Sendable (it also runs off the main actor, mid-stream),
+    // and is constructed before `self` exists, so it can't touch a MainActor-
+    // isolated property either way.
+    private let sanitizer = CompletionSanitizer(isCompleteWord: CompleteWordLookup.shared.contains)
     private let resolver = CaretResolver()
 
     private var buffer = KeystrokeBuffer()
@@ -250,6 +255,18 @@ final class GhostTextController {
         let text = assembled.prompt
         let suffix = context.textAfterCaret
         guard text.filter({ !$0.isWhitespace }).count >= 3 else { return }
+
+        // Real text still follows the caret — the user moved back into an
+        // already-written sentence (typo fix, arrow keys) rather than
+        // writing at the frontier. Ghost text draws inline from the caret
+        // rightward with no notion of what's already there, so a suggestion
+        // here would render directly over/into the existing words instead of
+        // extending into empty space: two versions of the sentence
+        // overlapping and unreadable. `suffix` is still passed to the model
+        // elsewhere for coherence, but that's a different question from
+        // whether it's safe to draw a suggestion at all — it isn't, here.
+        guard suffix?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true else { return }
+
         suggestionRequestedAt = lastKeystroke
         lastContextDescription = "ctx=\(assembled.usedAXContext ? "ax" : "buffer")/\(text.count)ch+\(context.textAfterCaret?.count ?? 0)after/\(Int(contextCost))ms"
 
@@ -339,11 +356,21 @@ final class GhostTextController {
         }
 
         currentCompletion = completion
+        // `.axRange` is the only tier that actually tracks the caret; `.axElement`
+        // anchors to the whole focused element's static frame (common on
+        // Electron apps like Claude Desktop, whose text view doesn't expose a
+        // real caret range through AX), and `.window` is cruder still. Showing
+        // ghost text at a fixed corner that never moves as you type reads as a
+        // rendering bug, not a hint — worse than showing nothing. Accept still
+        // works purely off the keystroke/buffer state below, with or without a
+        // visible overlay.
+        let overlayVisible = placement.source == .axRange
         panel.present(
             text: completion,
             at: placement.origin,
             lineHeight: placement.lineHeight,
-            font: candidates.font ?? NSFont.systemFont(ofSize: 13)
+            font: candidates.font ?? NSFont.systemFont(ofSize: 13),
+            visible: overlayVisible
         )
         snapshot.withLock { $0.suggestionVisible = true }
 
@@ -357,7 +384,7 @@ final class GhostTextController {
 
         let endToEnd = (ProcessInfo.processInfo.systemUptime - suggestionRequestedAt) * 1000
         FileLog.app("""
-            \(viaTypeThrough ? "typethrough" : "present") app=\(candidates.bundleID ?? "?") source=\(placement.source) \
+            \(viaTypeThrough ? "typethrough" : "present") app=\(candidates.bundleID ?? "?") source=\(placement.source) visible=\(overlayVisible) \
             e2e=\(viaTypeThrough ? 0 : Int(endToEnd))ms tt=\(typedThrough) inst=\(instantShown) \(lastContextDescription) font=\(candidates.font?.fontName ?? "-")@\(Int(candidates.font?.pointSize ?? 0)) \
             line=\(Int(placement.lineHeight)) origin=(\(Int(placement.origin.x)),\(Int(placement.origin.y))) \
             panel=\(panel.panelFrame)
@@ -375,10 +402,43 @@ final class GhostTextController {
         guard !text.isEmpty else { return }
         FileLog.app("accept \(scope) -> \(text.debugDescription)")
 
+        // A `.word` accept that leaves more of the already-generated
+        // completion behind keeps walking through *that*, the same zero-cost
+        // path `TypeThrough` uses for matched keystrokes, instead of asking
+        // the model again. This is what the spec actually calls for
+        // (`cotypist_pro_feature_spec.md` §2.2: "Repeated Tab presses walk
+        // through the existing suggestion word-by-word") — re-querying on
+        // every single Tab, which is what this used to do, is a different
+        // design, and it's the one that let holding Tab down chain into a
+        // run of fresh, increasingly repetitive completions instead of
+        // riding out the one coherent multi-word answer the model already
+        // gave.
+        let remainder = String(completion.dropFirst(text.count))
+        if scope == .word, !remainder.isEmpty, !remainder.allSatisfy(\.isWhitespace) {
+            cancelPending()
+            _ = buffer.apply(.acceptedCompletion(text))
+            KeystrokeSynthesizer.type(text)
+            currentCompletion = remainder
+            present(completion: remainder, viaTypeThrough: true)
+            typedThrough += 1
+            return
+        }
+
         dismiss()
         // Keep our buffer in step with the field: this text is now typed.
-        _ = buffer.apply(.acceptedCompletion(text))
+        let change = buffer.apply(.acceptedCompletion(text))
         KeystrokeSynthesizer.type(text)
+
+        // Without this, accepting leaves no suggestion scheduled until the user
+        // types a real character next: the synthesized keystrokes above are
+        // marker-filtered by the tap and never reach `handle()`, so nothing
+        // else would trigger the scheduler. A Tab pressed in that gap isn't
+        // swallowed (no suggestion is visible) and falls through to the app as
+        // a literal Tab — which most editors render as several spaces. Chaining
+        // into the normal request path here is what makes exhausting one
+        // suggestion and continuing to hold Tab flow into asking for the next
+        // one, rather than leaking tab characters.
+        apply(change)
     }
 
     private func dismiss() {
@@ -394,6 +454,20 @@ final class GhostTextController {
         pendingFire = nil
         inFlight?.cancel()
         inFlight = nil
+
+        // `Task.cancel()` is cooperative — MLX generation only checks it at
+        // specific points, so a completion already past its last check can
+        // still stream a token and land in `paint(_:generation:)` after this
+        // returns. `fire()` doesn't bump `generation` until it actually runs,
+        // up to 45ms later, so without this a completion cancelled by an
+        // accept() could slip through: `paint` compares against a
+        // `self.generation` that hasn't moved yet, sees a match, and shows a
+        // suggestion the user already just accepted. Holding Tab down then
+        // reads that reappearance as live and accepts it again — observed
+        // live as "iterations," / "after" / "many" each accepted twice in a
+        // row, ~85ms apart. Bumping here, at the moment anything is
+        // invalidated rather than at the next fire, closes the window.
+        generation &+= 1
     }
 
     /// Trusts the system-resolved character over a keycode re-translation for
@@ -432,6 +506,25 @@ final class GhostTextController {
 @MainActor
 enum GhostTextControllerHolder {
     static var shared: GhostTextController?
+}
+
+/// Case-insensitive complete-word lookup, filled in once `loadDictionary()`
+/// finishes. Lives outside `GhostTextController` — not behind the main actor —
+/// so `CompletionSanitizer`'s `@Sendable` closure can read it from wherever the
+/// streaming callback happens to be running, and so the sanitizer's default
+/// property initializer can reference it before `self` exists.
+final class CompleteWordLookup: @unchecked Sendable {
+    static let shared = CompleteWordLookup()
+
+    private let lock = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    func set(_ words: Set<String>) {
+        lock.withLock { $0 = words }
+    }
+
+    func contains(_ word: String) -> Bool {
+        lock.withLock { $0.contains(word.lowercased()) }
+    }
 }
 
 private extension ModifierSet {
