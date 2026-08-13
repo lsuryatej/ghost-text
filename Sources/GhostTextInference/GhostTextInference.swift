@@ -130,6 +130,22 @@ public actor CompletionEngine {
     /// it can be small.
     public static let defaultMaxTokens = 10
 
+    /// Upper bound on MLX's idle buffer-recycling pool. MLX's own docs note
+    /// "relatively small cache sizes (e.g., 2MB) perform just as well" for
+    /// many workloads; 64MB is deliberately generous headroom above that
+    /// rather than the smallest value that works, since prefill for the
+    /// largest prompts (600 chars capped) is the one shape here that's worth
+    /// letting the pool actually help with.
+    static let gpuCacheLimitBytes = 64 * 1024 * 1024
+
+    /// Belt-and-braces on top of `gpuCacheLimitBytes`. The cache limit only
+    /// takes effect lazily, on the next deallocation past the limit — normal
+    /// usage should never accumulate that far, but this forces an immediate,
+    /// unconditional hard reset periodically regardless, so a pathological
+    /// sequence of allocations can't ride past the limit indefinitely.
+    static let hardClearInterval = 200
+    private var requestCount = 0
+
     /// - Parameters:
     ///   - modelID: a HuggingFace repo id, e.g. `"mlx-community/Qwen2.5-0.5B-4bit"`.
     ///   - framing: how to turn a keystroke buffer into model input. Defaults
@@ -163,6 +179,22 @@ public actor CompletionEngine {
     /// Idempotent: calling it again after a successful warmup is a no-op.
     public func warmup(progress: (@Sendable (Double) -> Void)? = nil) async throws {
         if container != nil { return }
+
+        // MLX recycles freed buffers into a pool for reuse rather than
+        // releasing them immediately, and that pool is unbounded by default.
+        // Ghost Text's request shapes vary constantly (prompt length changes
+        // every keystroke, completions run 1-10 tokens, most requests are
+        // cancelled mid-flight) — exactly the pattern MLX's own docs warn
+        // grows the pool to "several GB... by the end of a long inference
+        // run" if left unconstrained. Observed live: an all-day session
+        // reached 11GB resident / 10GB swap, and MLX computation under that
+        // much memory pressure is where the model's own quality and latency
+        // fell apart too (garbage digit-string completions, 1500ms+ requests
+        // that should take ~100ms). Capping this is the actual fix, not a
+        // cosmetic one. `cacheLimit` bounds the idle pool; it does not evict
+        // `cacheBox.cache`, the KV cache we deliberately keep alive for
+        // prefix reuse across requests.
+        Memory.cacheLimit = Self.gpuCacheLimitBytes
 
         // Without these the chat-template terminators are decoded as literal
         // text and generation runs on past the end of the turn into multilingual
@@ -270,6 +302,12 @@ public actor CompletionEngine {
             previous.cancel()
             _ = try? await previous.value
         }
+
+        requestCount += 1
+        if requestCount % Self.hardClearInterval == 0 {
+            Memory.clearCache()
+        }
+
         let task = Task { try await self.performGeneration(buffer: buffer, suffix: suffix, maxTokens: maxTokens, onPartial: onPartial) }
         activeGeneration = task
         defer { if activeGeneration == task { activeGeneration = nil } }
@@ -349,7 +387,9 @@ public actor CompletionEngine {
                 cache = context.model.newCache(parameters: parameters)
                 reusedPrefix = 0
             }
-            cacheBox.lastReport = "cache=\(trimmable ? "trimmable" : "NOT-TRIMMABLE") reuse=\(reusedPrefix)/\(promptTokens.count)tok"
+            let memory = Memory.snapshot()
+            cacheBox.lastReport = "cache=\(trimmable ? "trimmable" : "NOT-TRIMMABLE") reuse=\(reusedPrefix)/\(promptTokens.count)tok "
+                + "mem=\(memory.activeMemory / 1_048_576)MB+\(memory.cacheMemory / 1_048_576)MBcache"
 
             let feedTokens = Array(promptTokens[reusedPrefix...])
             let lmInput = LMInput(tokens: MLXArray(feedTokens))
