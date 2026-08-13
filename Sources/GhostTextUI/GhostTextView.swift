@@ -9,7 +9,22 @@ final class GhostTextView: NSView {
     /// rects are reasoned about elsewhere in this file.
     override var isFlipped: Bool { true }
 
-    var showsBackdrop = false
+    /// On by default — see `backdropColor`/`textColor` below for why a bare,
+    /// unbacked ghost text color can't be trusted to stay legible.
+    var showsBackdrop = true
+
+    /// Fixed rather than semantic (`NSColor.tertiaryLabelColor` and
+    /// `.textBackgroundColor` were the previous choice). A semantic color
+    /// resolves against *this app's* effective appearance — which tracks
+    /// system-wide dark/light mode — not the actual background of whatever
+    /// field the overlay is floating over. System in Dark Mode + a plain
+    /// white Safari field produced light-gray-on-white: legible in
+    /// isolation, invisible in practice, and it looked like an entirely
+    /// different bug (mispositioning) until logs showed the geometry and
+    /// visibility were both already correct. A fixed dark chip with fixed
+    /// light text is self-contrasting regardless of what's underneath.
+    static let backdropColor = NSColor(white: 0.08, alpha: 0.82)
+    static let textColor = NSColor(white: 0.92, alpha: 1.0)
 
     private var attributedString = NSAttributedString()
 
@@ -18,7 +33,7 @@ final class GhostTextView: NSView {
             string: text,
             attributes: [
                 .font: font,
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                .foregroundColor: Self.textColor,
             ]
         )
         needsDisplay = true
@@ -37,7 +52,7 @@ final class GhostTextView: NSView {
 
         if showsBackdrop {
             let path = NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6)
-            NSColor.textBackgroundColor.withAlphaComponent(0.72).setFill()
+            Self.backdropColor.setFill()
             path.fill()
         }
 

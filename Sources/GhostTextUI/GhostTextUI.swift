@@ -43,10 +43,13 @@ public final class GhostOverlayPanel {
 
     // MARK: Public API
 
-    /// Draws a subtle rounded translucent backing behind the text so it stays
-    /// legible over busy backgrounds. Off by default: plain ghost text over
-    /// whatever is underneath.
-    public var showsBackdrop: Bool = false {
+    /// Draws a rounded backing behind the text so it stays legible over
+    /// whatever is underneath. On by default — bare text relies on a
+    /// semantic color choice matching the actual background it lands on,
+    /// which this app has no way to know: it can look fine over a dark host
+    /// app and be genuinely invisible (not just low-contrast) over a light
+    /// one, or vice versa. See `GhostTextView.backdropColor`/`textColor`.
+    public var showsBackdrop: Bool = true {
         didSet {
             guard showsBackdrop != oldValue else { return }
             view.showsBackdrop = showsBackdrop
@@ -54,6 +57,10 @@ public final class GhostOverlayPanel {
         }
     }
 
+    /// Whether a suggestion cycle is active — true once `present` has been
+    /// called and until `dismiss`, regardless of `visible`. Callers (Ghost
+    /// Text's `TypeThrough` in particular) key off this to know a completion
+    /// exists to type along, independent of whether anything is drawn.
     public private(set) var isPresented: Bool = false
 
     /// The panel's current screen frame (AppKit screen coordinates), after
@@ -78,16 +85,24 @@ public final class GhostOverlayPanel {
     ///     log the surrounding line band.
     ///   - fontSize: Size for the ghost text's system font. Pass the caret
     ///     line's actual font size so the baseline alignment reads true.
-    public func present(text: String, at origin: CGPoint, lineHeight: CGFloat, font: NSFont) {
+    ///   - visible: Pass `false` when the caller only trusts the placement
+    ///     enough to type along it, not enough to draw it — a static
+    ///     element-frame fallback that doesn't track the caret would show
+    ///     ghost text sitting in the wrong place, or not moving as the user
+    ///     types, which reads as a rendering bug rather than a hint. The
+    ///     window is never ordered on screen in that case; every other piece
+    ///     of state (`isPresented`, the anchor, the frame) still updates
+    ///     normally, since the caller keeps relying on it for acceptance.
+    public func present(text: String, at origin: CGPoint, lineHeight: CGFloat, font: NSFont, visible: Bool = true) {
         anchorOrigin = origin
         anchorLineHeight = lineHeight
         anchorFont = font
         view.configure(text: text, font: font)
         relayout()
-        if !isPresented {
+        if !isPresented, visible {
             panel.orderFrontRegardless()
-            isPresented = true
         }
+        isPresented = true
     }
 
     /// Updates the visible text in place: resizes around the same anchor
