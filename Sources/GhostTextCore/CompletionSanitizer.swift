@@ -9,8 +9,16 @@ import Foundation
 public struct CompletionSanitizer: Sendable {
     public var maxWords: Int
 
-    public init(maxWords: Int = 6) {
+    /// Whether a fragment is itself a complete word, not one still being
+    /// typed. Defaults to "yes" (i.e. no rejection) so callers that don't
+    /// care about this — most tests — see the old, permissive behavior;
+    /// the app wires in a real dictionary lookup. See `rejectAbandonedFragment`
+    /// and `normalizeWhitespace`.
+    public var isCompleteWord: @Sendable (String) -> Bool
+
+    public init(maxWords: Int = 6, isCompleteWord: @escaping @Sendable (String) -> Bool = { _ in true }) {
         self.maxWords = maxWords
+        self.isCompleteWord = isCompleteWord
     }
 
     /// Runs the full cleanup pipeline. Returns `nil` when nothing usable
@@ -23,7 +31,8 @@ public struct CompletionSanitizer: Sendable {
         work = Self.stripLeadingEllipsis(work)
         work = Self.dropEchoedContext(work, buffer: buffer)
         work = Self.dropRestartedWord(work, buffer: buffer)
-        work = Self.normalizeWhitespace(work, bufferEndsInWhitespace: buffer.last?.isWhitespace ?? false)
+        work = Self.rejectAbandonedFragment(work, buffer: buffer, isCompleteWord: isCompleteWord)
+        work = Self.normalizeWhitespace(work, buffer: buffer, isCompleteWord: isCompleteWord)
         work = Self.truncateAtDegenerateRepetition(work)
         work = Self.capWords(work, maxWords: maxWords)
 
@@ -267,19 +276,84 @@ public struct CompletionSanitizer: Sendable {
         return remainder
     }
 
-    /// Collapses internal whitespace runs to a single space, and enforces
-    /// the leading-space rule: at most one leading space survives, and even
-    /// that one is dropped if `buffer` already ends in whitespace (since the
-    /// separation is already there).
-    private static func normalizeWhitespace(_ s: String, bufferEndsInWhitespace: Bool) -> String {
+    /// Rejects a completion that ignores the word the user is still typing.
+    ///
+    /// `dropRestartedWord` handles a model that echoes the in-progress fragment
+    /// back before continuing it. This handles the other failure: the model
+    /// answers with an unrelated word instead, e.g. buffer "...quarterly rep" and
+    /// completion " deadline". Typed through, that stitches into "quarterly rep
+    /// deadline" — a stray word landing inside one you hadn't finished, which
+    /// reads as a spurious space breaking the word apart.
+    ///
+    /// Only fires when the fragment is not itself a complete word: "the cat" +
+    /// " sat on the mat" is the model correctly starting a new word after a
+    /// finished one, and must not be rejected just because "cat" ends in a
+    /// letter. Whether the fragment is "finished" can't be known from keystrokes
+    /// alone, so `isCompleteWord` (a real dictionary lookup in the app) is the
+    /// signal: an unfinished fragment is essentially never a real word.
+    static func rejectAbandonedFragment(_ completion: String, buffer: String, isCompleteWord: (String) -> Bool) -> String {
+        guard let lastCharacter = buffer.last, lastCharacter.isLetter else { return completion }
+        let fragment = String(buffer.reversed().prefix(while: { $0.isLetter }).reversed())
+        guard fragment.count >= 2, !isCompleteWord(fragment) else { return completion }
+
+        // A direct continuation has no whitespace before the next letter — the
+        // model is still writing the same token. Anything else abandons it.
+        guard let first = completion.first else { return completion }
+        return first.isWhitespace ? "" : completion
+    }
+
+    /// Collapses internal whitespace runs to a single space, and enforces the
+    /// leading-space rule against the actual buffer rather than trusting
+    /// whatever the model happened to emit:
+    ///
+    /// - Buffer ends in whitespace: no leading space — the separation is
+    ///   already there, so even one the model added is dropped.
+    /// - Buffer ends in a letter or digit: genuinely ambiguous (mid-token
+    ///   continuation vs. a fresh word after one that just finished), so the
+    ///   model's own choice is preserved as-is. `rejectAbandonedFragment`
+    ///   already rejects the cases where that choice is wrong.
+    /// - Buffer ends in punctuation: a new word is starting and always needs
+    ///   a separator, model or not. Small local models drop it
+    ///   disproportionately often right after a sentence-ending "." —
+    ///   unnoticed here, that glues into "sentence.Next".
+    private static func normalizeWhitespace(_ s: String, buffer: String, isCompleteWord: (String) -> Bool) -> String {
         let hasLeadingWhitespace = s.first?.isWhitespace ?? false
         let words = s.split(whereSeparator: { $0.isWhitespace })
         let collapsed = words.joined(separator: " ")
+        guard !collapsed.isEmpty else { return collapsed }
 
-        if hasLeadingWhitespace, !bufferEndsInWhitespace, !collapsed.isEmpty {
+        guard let lastBufferCharacter = buffer.last else {
+            // Nothing typed yet: ambiguous, so defer to the model's own choice.
+            return hasLeadingWhitespace ? " " + collapsed : collapsed
+        }
+        if lastBufferCharacter.isWhitespace { return collapsed }
+
+        if lastBufferCharacter.isLetter || lastBufferCharacter.isNumber {
+            let fragment = String(buffer.reversed().prefix(while: { $0.isLetter || $0.isNumber }).reversed())
+            guard !fragment.isEmpty, isCompleteWord(fragment), !hasLeadingWhitespace else {
+                // Fragment still in progress (or the model already
+                // supplied its own separator): ambiguous either way, so
+                // defer to the model's own choice, same as always.
+                return hasLeadingWhitespace ? " " + collapsed : collapsed
+            }
+            // The fragment is already a finished word and the model glued
+            // straight onto it with no space. That's only legitimate if the
+            // glued result is itself a real word ("the" + "n" -> "then");
+            // check the actual join rather than just the fragment, because
+            // `dropRestartedWord` already turns a genuine restart-and-continue
+            // ("rep" + "report?") into a clean continuation ("ort?") upstream,
+            // and re-deciding purely from the fragment there would insert a
+            // space back into the middle of a real word. Observed live: "the"
+            // + model output "ghost text in this chat." glued into
+            // "theghost" — "the" + "ghost" isn't a word, so this forces the
+            // separator back in.
+            let firstRun = String(collapsed.prefix(while: { $0.isLetter || $0.isNumber }))
+            if !firstRun.isEmpty, isCompleteWord(fragment + firstRun) {
+                return collapsed
+            }
             return " " + collapsed
         }
-        return collapsed
+        return " " + collapsed
     }
 
     /// Caps to `maxWords` words, preserving a single leading space marker

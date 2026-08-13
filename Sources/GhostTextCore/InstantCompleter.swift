@@ -25,6 +25,20 @@ public struct InstantCompleter: Sendable {
         self.dictionary = dictionary.map { $0.lowercased() }.sorted()
     }
 
+    /// Whether `word` is itself a complete dictionary entry, not merely a
+    /// prefix of one. Used to tell "the user finished this word" from "the
+    /// user is still typing it" when a fragment could be read either way.
+    public func isCompleteWord(_ word: String) -> Bool {
+        let lowered = word.lowercased()
+        var low = 0
+        var high = dictionary.count
+        while low < high {
+            let mid = (low + high) / 2
+            if dictionary[mid] < lowered { low = mid + 1 } else { high = mid }
+        }
+        return low < dictionary.count && dictionary[low] == lowered
+    }
+
     /// Shortest dictionary word extending `prefix`, or nil.
     func dictionaryMatch(prefix: String) -> String? {
         var low = 0

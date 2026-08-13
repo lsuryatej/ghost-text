@@ -86,7 +86,11 @@ final class CompletionSanitizerTests: XCTestCase {
     }
 
     func testNoEchoWhenNoOverlapExists() {
-        let sanitizer = CompletionSanitizer()
+        // isCompleteWord: false — "xyz123" isn't a real word, so this stays
+        // on the "still ambiguous" path and isn't about this test's concern
+        // (echo detection); see testInsertsMissingLeadingSpaceAfterACompleteWordFragment
+        // for the case where the fragment is complete.
+        let sanitizer = CompletionSanitizer(isCompleteWord: { _ in false })
         XCTAssertEqual(sanitizer.sanitize(raw: "completely unrelated", buffer: "xyz123"), "completely unrelated")
     }
 
@@ -110,6 +114,43 @@ final class CompletionSanitizerTests: XCTestCase {
     func testCollapsesMultipleLeadingSpacesToOne() {
         let sanitizer = CompletionSanitizer()
         XCTAssertEqual(sanitizer.sanitize(raw: "   world", buffer: "hello"), " world")
+    }
+
+    /// The bug this exists for: after a sentence-ending ".", the model
+    /// sometimes emits the next word with no leading space at all. Shown
+    /// as-is that glues onto the period: "architecture." + "I" -> "architecture.I".
+    /// A new word after punctuation always needs a separator, model or not.
+    func testInsertsMissingLeadingSpaceAfterPunctuation() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "I designed", buffer: "architecture."), " I designed")
+    }
+
+    func testDoesNotDoubleTheSpaceWhenModelAlreadyIncludedOne() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: " I designed", buffer: "architecture."), " I designed")
+    }
+
+    func testInsertsMissingLeadingSpaceAfterComma() {
+        let sanitizer = CompletionSanitizer()
+        XCTAssertEqual(sanitizer.sanitize(raw: "and", buffer: "scalable,"), " and")
+    }
+
+    /// The bug this exists for, observed live: buffer "the", raw model output
+    /// "ghost text in this chat." with no leading space — glued as-is that's
+    /// "theghost", not "the ghost". "the" is a real, already-finished word,
+    /// so — unlike a genuine in-progress fragment — it always needs a
+    /// separator before the next one.
+    func testInsertsMissingLeadingSpaceAfterACompleteWordFragment() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { $0 == "the" })
+        XCTAssertEqual(sanitizer.sanitize(raw: "ghost text in this chat.", buffer: "the"), " ghost text in this chat.")
+    }
+
+    /// Contrast case: "cre" is not a complete word, so the model continuing
+    /// directly with no leading space is a genuine in-progress continuation
+    /// and must not get a space forced into the middle of "create".
+    func testDoesNotInsertSpaceMidwayThroughAGenuineContinuation() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { $0 == "the" })
+        XCTAssertEqual(sanitizer.sanitize(raw: "ate a bug report", buffer: "please cre"), "ate a bug report")
     }
 
     // MARK: - Word capping
@@ -384,5 +425,43 @@ final class CompletionSanitizerTests: XCTestCase {
     func testSingleLetterFragmentIsIgnored() {
         let sanitizer = CompletionSanitizer()
         XCTAssertEqual(sanitizer.sanitize(raw: "apple pie", buffer: "an a"), "apple pie")
+    }
+
+    // MARK: - Abandoned mid-word fragment
+
+    /// The bug this exists for: asked to continue "quarterly rep", the model
+    /// answers with an unrelated word instead of finishing "rep". Shown as-is
+    /// this reads as "quarterly rep deadline" — a stray word landing inside an
+    /// unfinished one.
+    func testRejectsUnrelatedWordWhileFragmentIsIncomplete() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { $0 != "rep" })
+        XCTAssertNil(sanitizer.sanitize(raw: " deadline", buffer: "quarterly rep"))
+    }
+
+    func testAllowsDirectContinuationOfIncompleteFragment() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { $0 != "cre" })
+        XCTAssertEqual(sanitizer.sanitize(raw: "ate a bug report", buffer: "please cre"), "ate a bug report")
+    }
+
+    /// "cat" is a complete word, so a fresh word after it is a legitimate
+    /// prediction, not an abandoned fragment, even though the buffer ends on a
+    /// letter.
+    func testAllowsNewWordAfterACompleteWordFragment() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { $0 == "cat" })
+        XCTAssertEqual(sanitizer.sanitize(raw: " sat on the mat", buffer: "the cat"), " sat on the mat")
+    }
+
+    /// Buffer ends in whitespace, so there is no in-progress fragment to
+    /// abandon — the check must not fire at all.
+    func testDoesNotFireWhenBufferEndsInWhitespace() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { _ in false })
+        XCTAssertEqual(sanitizer.sanitize(raw: "deadline", buffer: "the "), "deadline")
+    }
+
+    /// A single dangling letter is too short to guess from, same threshold as
+    /// `dropRestartedWord`.
+    func testDoesNotFireOnASingleLetterFragment() {
+        let sanitizer = CompletionSanitizer(isCompleteWord: { _ in false })
+        XCTAssertEqual(sanitizer.sanitize(raw: " apple", buffer: "an a"), " apple")
     }
 }
