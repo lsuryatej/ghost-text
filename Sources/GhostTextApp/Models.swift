@@ -26,6 +26,14 @@ struct ModelChoice: Sendable, Equatable, Identifiable {
         // Good prose, but 550-850ms in app conditions. Kept for comparison.
         ModelChoice(id: "mlx-community/gemma-3-1b-it-4bit", name: "Gemma 3 1B (slow)", approximateSizeGB: 0.8, recommended: false),
         ModelChoice(id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit", name: "Qwen2.5 1.5B", approximateSizeGB: 0.9, recommended: false),
+        // Base (non-instruct) checkpoint. Tried as an experiment and reverted:
+        // BENCH.md already has a rigorous A/B (`raw` vs `chatPrefill`, 20
+        // prompts each) showing raw/base framing reliably drifts into
+        // quiz/exam artifacts ("____（进入）", "A. B. C." multiple choice) -
+        // "a symptom of what it was pretrained on, not a framing problem."
+        // Live use tonight reproduced exactly that failure mode. Kept in the
+        // catalog for comparison, not recommended.
+        ModelChoice(id: "mlx-community/Qwen2.5-1.5B-4bit", name: "Qwen2.5 1.5B Base", approximateSizeGB: 0.9, recommended: false),
         ModelChoice(id: "mlx-community/gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B", approximateSizeGB: 2.3, recommended: false),
         // What Cotypist is currently running here.
         ModelChoice(id: "mlx-community/gemma-4-e2b-it-4bit", name: "Gemma 4 E2B", approximateSizeGB: 3.2, recommended: true),

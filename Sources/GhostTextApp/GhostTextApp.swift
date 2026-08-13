@@ -21,7 +21,7 @@ enum Permissions {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let controller = GhostTextController()
     private let probe = AXProbe()
 
@@ -30,11 +30,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fill-in-the-blank artifacts; prefilling an assistant turn that is never
     /// closed keeps it continuing the sentence. See BENCH.md.
     private var engine = CompletionEngine(modelID: ModelChoice.current.id)
-    private(set) var modelReady = false
-    private(set) var activeModel = ModelChoice.current
-    private(set) var loadProgress: Double = 0
+    // @Published, not plain stored properties: NSApplicationDelegateAdaptor only
+    // re-renders the menu on a change to these if AppDelegate publishes it — without
+    // this, selectModel() genuinely switches the model (confirmed via the log and
+    // actual completion behavior) but the menu's checkmark keeps showing whatever was
+    // true when SwiftUI happened to last redraw it, which reads as "stuck on Qwen3."
+    @Published private(set) var modelReady = false
+    @Published private(set) var activeModel = ModelChoice.current
+    @Published private(set) var loadProgress: Double = 0
     let instructions = InstructionsStore()
-    private(set) var probeRunning = false
+    @Published private(set) var probeRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -133,16 +138,32 @@ struct GhostTextApp: App {
             Menu(delegate.modelReady
                 ? "Model: \(delegate.activeModel.name)"
                 : "Model: downloading \(Int(delegate.loadProgress * 100))%") {
-                Section("Recommended") {
-                    ForEach(ModelChoice.catalog.filter(\.recommended)) { choice in
-                        modelButton(choice)
+                // A real Picker, not a hand-rolled "✓ " prefix on a Button
+                // title: AppKit doesn't reliably render a leading Unicode
+                // checkmark typed into a menu item's title (the "   " padding
+                // on unselected rows was the same fragile trick in reverse),
+                // so the previous version genuinely didn't show which model
+                // was active. Binding a Picker to the selection gets a native
+                // menu checkmark that's guaranteed correct.
+                Picker("Model", selection: Binding(
+                    get: { delegate.activeModel.id },
+                    set: { newID in
+                        guard let choice = ModelChoice.catalog.first(where: { $0.id == newID }) else { return }
+                        delegate.selectModel(choice)
+                    }
+                )) {
+                    Section("Recommended") {
+                        ForEach(ModelChoice.catalog.filter(\.recommended)) { choice in
+                            Text(choice.displayName).tag(choice.id)
+                        }
+                    }
+                    Section("Other") {
+                        ForEach(ModelChoice.catalog.filter { !$0.recommended }) { choice in
+                            Text(choice.displayName).tag(choice.id)
+                        }
                     }
                 }
-                Section("Other") {
-                    ForEach(ModelChoice.catalog.filter { !$0.recommended }) { choice in
-                        modelButton(choice)
-                    }
-                }
+                .pickerStyle(.inline)
             }
             Button("Edit custom instructions\u{2026}") { delegate.instructions.reveal() }
             Divider()
@@ -155,13 +176,6 @@ struct GhostTextApp: App {
             Button("Quit Ghost Text") { NSApplication.shared.terminate(nil) }
         } label: {
             Image(systemName: enabled ? "text.cursor" : "moon.zzz")
-        }
-    }
-
-    @ViewBuilder
-    private func modelButton(_ choice: ModelChoice) -> some View {
-        Button(choice.id == delegate.activeModel.id ? "\u{2713} \(choice.displayName)" : "   \(choice.displayName)") {
-            delegate.selectModel(choice)
         }
     }
 }
